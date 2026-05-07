@@ -69,7 +69,9 @@ ndmc_try() {
                 err "NDM rejected: $line
   $out
 This usually means the firmware doesn't support OpkgTunN interfaces.
-Stable NDM 3.0+ does; some bare-bones or preview builds don't."
+The OpkgTun noun was introduced in KeeneticOS 5.0 (Alpha 1, May 2025);
+older firmware doesn't have it. Update via NDM web UI → System →
+Update channel → Release."
                 ;;
             *)
                 err "ndmc failed on: $line
@@ -98,7 +100,7 @@ diag/kn_install_entware_step1.py from a workstation)."
 ok "Entware present"
 
 if ! command -v curl >/dev/null 2>&1; then
-    info "installing curl (busybox wget can't do chunked HTTPS reliably)"
+    info "installing curl (busybox wget is unreliable on HTTPS)"
     opkg update >/dev/null
     opkg install curl >/dev/null
 fi
@@ -113,19 +115,24 @@ if ! ndmc -c "show version" >/dev/null 2>&1; then
 auto-available on Keenetic firmware. Are you actually on a Keenetic router?"
 fi
 
-# 2.2 NDM version >= 3.0
+# 2.2 NDM version >= 5.0
+# OpkgTun interfaces landed in KeeneticOS 5.0 Alpha 1 (May 2025);
+# `dns-proxy route ... auto reject` followed in 5.0 Alpha 9 (Jul 2025).
+# Both are required, so anything < 5.0 is a hard fail.
 NDM_VER=$(ndmc -c "show version" 2>/dev/null \
             | awk '/^ *release: / {print $2; exit}' \
             | sed 's/[^0-9.].*//')
 if [ -z "$NDM_VER" ]; then
-    warn "could not parse NDM version (continuing)"
+    warn "could not parse NDM version (continuing — may fail later)"
 else
     NDM_MAJOR=$(echo "$NDM_VER" | cut -d. -f1)
-    if [ -n "$NDM_MAJOR" ] && [ "$NDM_MAJOR" -ge 3 ] 2>/dev/null; then
-        ok "NDM version $NDM_VER (>= 3.0 — OpkgTun + dns-proxy route OK)"
+    if [ -n "$NDM_MAJOR" ] && [ "$NDM_MAJOR" -ge 5 ] 2>/dev/null; then
+        ok "NDM version $NDM_VER (>= 5.0 — OpkgTun + dns-proxy route supported)"
     else
-        err "NDM $NDM_VER is too old. Need 3.0+ for OpkgTunN interface and \
-'dns-proxy route ... auto reject' kill-switch syntax."
+        err "NDM $NDM_VER is too old. KeeneticOS 5.0+ is required:
+  - OpkgTun interface noun: introduced in 5.0 Alpha 1 (May 2025)
+  - 'dns-proxy route ... auto reject' kill-switch: 5.0 Alpha 9 (Jul 2025)
+Update via NDM web UI → System → Update channel → Release."
     fi
 fi
 

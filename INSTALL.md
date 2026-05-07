@@ -39,8 +39,8 @@ script detects a non-tty environment and falls back to plain output.
 
 | | |
 |---|---|
-| Router | Keenetic with **NDM 3.0+** and the **OPKG component** enabled (Hopper, Giga, Ultra, Duo, etc.). Tested on Netcraze Hopper 4G+ (NC-2312) running NDM 5.0.10. |
-| NDM features | `OpkgTunN` interface support, `object-group fqdn`, `dns-proxy` with the `route ... auto reject` extension. All present on stable NDM 3.0+; the installer probes for them and aborts with a clear error if missing. |
+| Router | Keenetic with **KeeneticOS 5.0+** and the **OPKG component** enabled (Hopper, Giga, Ultra, Duo, etc.). Tested on Netcraze Hopper 4G+ (NC-2312) running NDM 5.0.10. |
+| NDM features | `OpkgTunN` interface noun (introduced in NDM 5.0 Alpha 1), `object-group fqdn`, and `dns-proxy route ... auto reject` (5.0 Alpha 9). The installer probes for each and aborts with a clear error if missing. |
 | Storage | At least 60 MiB free on `/opt`. Internal flash works (NC-2312 has ~98 MiB usable); a USB stick also works. |
 | Subscription | A v2ray-style subscription URL that returns a base64-encoded list of `vless://` / `vmess://` / `trojan://` / `ss://` URIs. |
 | LAN access | SSH connection to the router on **tcp/222** (dropbear) as `root`. |
@@ -76,8 +76,9 @@ ssh -p 222 root@<router-ip>
 
 **On the router** (you'll see the `Hopper4G+ #` prompt). The base
 Entware install ships only `opkg` and busybox basics — `curl` isn't
-included and the busybox `wget` you'd find in `/sbin` segfaults on
-chunked HTTPS. So bootstrap `curl` first, then fetch the installer:
+included, and the busybox `wget` in `/sbin` is unreliable on HTTPS
+(several long-standing bugs around TLS and large transfers). So
+bootstrap `curl` first, then fetch the installer:
 
 ```sh
 opkg update && opkg install curl
@@ -101,7 +102,7 @@ It then performs 9 steps:
 | | |
 |---|---|
 | 1 | preflight (Entware, curl) |
-| 2 | NDM components — verify ndmc CLI, version ≥ 3.0, `object-group fqdn`, `dns-proxy` |
+| 2 | NDM components — verify ndmc CLI, version ≥ 5.0, `object-group fqdn`, `dns-proxy` |
 | 3 | router IP |
 | 4 | subscription URL |
 | 5 | `opkg install sing-box-go python3 cron curl` |
@@ -231,7 +232,7 @@ rm -rf /opt/etc/sing-box /opt/var/lib/sing-box /opt/share/sing-box
 |---|---|---|
 | Installer fails at "Entware not detected" | OPKG component not enabled or not yet rebooted | Step 1 again |
 | Installer fails at "ndmc not responding" | Not actually a Keenetic, or NDM service crashed | Reboot the router; if persistent, this is not a Keenetic-class device |
-| Installer fails at "NDM X.Y is too old" | Firmware older than NDM 3.0 | Update via NDM web UI → System → Update; OpkgTun and `dns-proxy route ... auto reject` need 3.0+ |
+| Installer fails at "NDM X.Y is too old" | Firmware older than KeeneticOS 5.0 | Update via NDM web UI → System → Update channel → Release. OpkgTun landed in 5.0 Alpha 1 (May 2025); `dns-proxy route ... auto reject` in 5.0 Alpha 9 (Jul 2025) |
 | Installer fails at "this NDM build does not support object-group fqdn" | Stripped-down or preview firmware | Switch to stable channel via NDM web UI → System → Update channel → "Release" |
 | Installer warns "dns-proxy not in running-config" | DNS proxy component disabled | NDM web UI → System settings → Component options → enable DNS proxy / Internet filter |
 | `opkg install sing-box-go` fails: not enough space | `/opt` partition full | `df -h /opt`; remove unused packages or move `/opt` to a USB stick |

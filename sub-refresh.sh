@@ -50,6 +50,8 @@ TMP=$(mktemp -d /tmp/subrefresh.XXXXXX)
 trap 'rm -rf "$TMP"' EXIT
 
 if ! curl -fsSL --max-time 30 -o "$TMP/sub.txt" -A "ClashforAndroid/2.5.12" "$URL"; then
+    # Use curl, not busybox wget — wget on Keenetic is unreliable on HTTPS
+    # for non-trivial transfers.
     log "FAIL: curl subscription"
     exit 1
 fi

@@ -306,8 +306,8 @@ opkg install python3 python3-urllib python3-codecs cron curl
 ```
 
 The script:
-1. Pulls the subscription (curl, **not** busybox wget — segfaults on
-   HTTPS with chunked transfer).
+1. Pulls the subscription (curl, **not** busybox wget — wget on
+   Keenetic is unreliable for non-trivial HTTPS transfers).
 2. Re-runs the converter (`sub_to_singbox.py`) with persistent
    `country_cache.json` so the same IP→cc lookup doesn't hit ip-api.com
    on every refresh.

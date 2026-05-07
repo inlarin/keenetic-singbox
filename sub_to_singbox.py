@@ -395,12 +395,19 @@ def build_config(outbounds: list[dict[str, Any]],
                 "output": "/tmp/sing-box.log"},
         "dns": {
             "servers": [
+                # `detour` is a Dial Field on the new-style UDP server (sends
+                # the upstream query through `select` so DNS isn't leaked to
+                # the ISP). Verified against
+                # https://sing-box.sagernet.org/configuration/dns/server/udp/
+                # + /configuration/shared/dial/.
                 {"type": "udp", "tag": "remote", "server": "1.1.1.1", "detour": "select"},
                 {"type": "udp", "tag": "local", "server": router_ip},
             ],
+            # DNS rule schema in 1.11+: `server` moved to rule actions.
+            # https://sing-box.sagernet.org/configuration/dns/rule/
             "rules": [
-                {"clash_mode": "direct", "server": "local"},
-                {"clash_mode": "global", "server": "remote"},
+                {"clash_mode": "direct", "action": "route", "server": "local"},
+                {"clash_mode": "global", "action": "route", "server": "remote"},
             ],
             "final": "remote",
             "strategy": "ipv4_only",
@@ -422,10 +429,13 @@ def build_config(outbounds: list[dict[str, Any]],
             {"type": "direct", "tag": "direct"},
         ],
         "route": {
+            # Route rule schema in 1.11+: top-level `outbound` moved to
+            # rule actions; `sniff` and `hijack-dns` are non-final actions.
+            # https://sing-box.sagernet.org/configuration/route/rule_action/
             "rules": [
                 {"action": "sniff"},
                 {"protocol": "dns", "action": "hijack-dns"},
-                {"ip_is_private": True, "outbound": "direct"},
+                {"ip_is_private": True, "action": "route", "outbound": "direct"},
             ],
             "final": "select",
             "auto_detect_interface": False,
