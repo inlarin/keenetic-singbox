@@ -56,8 +56,28 @@ confirm() {
     done
 }
 
-TOTAL_STEPS=8
+TOTAL_STEPS=9
 N=0; nstep() { N=$((N + 1)); step "$N" "$1"; }
+
+# Run an ndmc command, abort with the captured output on failure.
+# Wraps the bare ndmc -c so the user sees what NDM actually said.
+ndmc_try() {
+    line=$1
+    if ! out=$(ndmc -c "$line" 2>&1); then
+        case "$out" in
+            *"unknown noun"*|*"no such command"*|*"OpkgTun"*)
+                err "NDM rejected: $line
+  $out
+This usually means the firmware doesn't support OpkgTunN interfaces.
+Stable NDM 3.0+ does; some bare-bones or preview builds don't."
+                ;;
+            *)
+                err "ndmc failed on: $line
+  $out"
+                ;;
+        esac
+    fi
+}
 
 # ── banner ──────────────────────────────────────────────────────────────────
 cat <<EOF
@@ -84,7 +104,52 @@ if ! command -v curl >/dev/null 2>&1; then
 fi
 ok "curl available"
 
-# ── 2. detect / confirm router IP ───────────────────────────────────────────
+# ── 2. NDM component verification ───────────────────────────────────────────
+nstep "verify NDM components"
+
+# 2.1 ndmc responsive
+if ! ndmc -c "show version" >/dev/null 2>&1; then
+    err "ndmc not responding — Keenetic NDM CLI is required and should be \
+auto-available on Keenetic firmware. Are you actually on a Keenetic router?"
+fi
+
+# 2.2 NDM version >= 3.0
+NDM_VER=$(ndmc -c "show version" 2>/dev/null \
+            | awk '/^ *release: / {print $2; exit}' \
+            | sed 's/[^0-9.].*//')
+if [ -z "$NDM_VER" ]; then
+    warn "could not parse NDM version (continuing)"
+else
+    NDM_MAJOR=$(echo "$NDM_VER" | cut -d. -f1)
+    if [ -n "$NDM_MAJOR" ] && [ "$NDM_MAJOR" -ge 3 ] 2>/dev/null; then
+        ok "NDM version $NDM_VER (>= 3.0 — OpkgTun + dns-proxy route OK)"
+    else
+        err "NDM $NDM_VER is too old. Need 3.0+ for OpkgTunN interface and \
+'dns-proxy route ... auto reject' kill-switch syntax."
+    fi
+fi
+
+# 2.3 object-group fqdn support — probe via create+remove
+info "probing object-group fqdn support"
+if ndmc -c "object-group fqdn _kss_probe" >/dev/null 2>&1; then
+    ndmc -c "no object-group fqdn _kss_probe" >/dev/null 2>&1 || true
+    ok "object-group fqdn supported"
+else
+    err "this NDM build does not support 'object-group fqdn'. The kill-switch \
+('auto reject' on dns-proxy route) and FQDN-based routing both depend on it."
+fi
+
+# 2.4 dns-proxy active in running-config
+info "checking dns-proxy active"
+if ndmc -c "show running-config" 2>/dev/null | grep -qE '^[[:space:]]*dns-proxy'; then
+    ok "dns-proxy active in running-config"
+else
+    warn "dns-proxy not visible in running-config — the kill-switch ('auto \
+reject') won't bind without it. Enable dns-proxy in the NDM web UI \
+(System settings → Component options → 'Internet filter' / 'DNS proxy')."
+fi
+
+# ── 3. detect / confirm router IP ───────────────────────────────────────────
 nstep "router LAN IP"
 
 DETECTED_IP=$(ip -4 addr show br0 2>/dev/null | awk '/inet / {print $2}' | cut -d/ -f1 | head -1)
@@ -98,7 +163,7 @@ fi
 [ -n "$ROUTER_IP" ] || err "router IP is required"
 ok "using $ROUTER_IP"
 
-# ── 3. subscription URL ─────────────────────────────────────────────────────
+# ── 4. subscription URL ─────────────────────────────────────────────────────
 nstep "subscription URL"
 
 EXISTING_URL=""
@@ -123,7 +188,7 @@ fi
 [ -n "$SUBSCRIPTION_URL" ] || err "subscription URL is required"
 ok "subscription URL captured"
 
-# ── 4. install Entware deps ─────────────────────────────────────────────────
+# ── 5. install Entware deps ─────────────────────────────────────────────────
 nstep "install Entware packages"
 
 info "running opkg update + install (this can take 1–3 min)"
@@ -132,7 +197,7 @@ opkg install sing-box-go python3 python3-urllib python3-codecs cron curl
 /opt/etc/init.d/S10cron start 2>/dev/null || true
 ok "sing-box-go, python3, cron installed"
 
-# ── 5. healthcheck secret ───────────────────────────────────────────────────
+# ── 6. healthcheck secret ───────────────────────────────────────────────────
 nstep "Clash API secret"
 
 mkdir -p "$SING_DIR"
@@ -152,7 +217,7 @@ fi
 printf '%s' "$SECRET" > "$SECRET_FILE"; chmod 600 "$SECRET_FILE"
 printf '%s' "$SUBSCRIPTION_URL" > "$URL_FILE"; chmod 600 "$URL_FILE"
 
-# ── 6. fetch scripts from public repo ───────────────────────────────────────
+# ── 7. fetch scripts from public repo ───────────────────────────────────────
 nstep "download stack from public repo"
 
 mkdir -p /opt/var/lib/sing-box "$SHARE_DIR/ui" \
@@ -172,7 +237,7 @@ fetch "$REPO_URL/sub-refresh.sh"                /opt/etc/cron.daily/sub-refresh 
 fetch "$REPO_URL/sub_to_singbox.py"             "$SHARE_DIR/sub_to_singbox.py"                  0644
 ok "4 scripts deployed"
 
-# ── 7. generate config + apply NDM setup ────────────────────────────────────
+# ── 8. generate config + apply NDM setup ────────────────────────────────────
 nstep "configure sing-box + register NDM interface"
 
 info "generating sing-box config from subscription"
@@ -191,12 +256,12 @@ info "applying NDM OpkgTun0 registration"
 sleep 2
 while IFS= read -r line; do
     case "$line" in \!*|"") continue ;; esac
-    ndmc -c "$line" >/dev/null
+    ndmc_try "$line"
 done < "$NDM_TMP"
-ndmc -c 'system configuration save' >/dev/null
+ndmc_try 'system configuration save'
 ok "NDM updated"
 
-# ── 8. start + smoke test ───────────────────────────────────────────────────
+# ── 9. start + smoke test ───────────────────────────────────────────────────
 nstep "start services + smoke test"
 
 /opt/etc/init.d/S99sing-box start

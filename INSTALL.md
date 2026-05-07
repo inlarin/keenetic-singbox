@@ -39,7 +39,8 @@ script detects a non-tty environment and falls back to plain output.
 
 | | |
 |---|---|
-| Router | Keenetic with the **OPKG component** enabled (Hopper, Giga, Ultra, Duo, etc. — anything where Entware can run). Tested on Netcraze Hopper 4G+ (NC-2312). |
+| Router | Keenetic with **NDM 3.0+** and the **OPKG component** enabled (Hopper, Giga, Ultra, Duo, etc.). Tested on Netcraze Hopper 4G+ (NC-2312) running NDM 5.0.10. |
+| NDM features | `OpkgTunN` interface support, `object-group fqdn`, `dns-proxy` with the `route ... auto reject` extension. All present on stable NDM 3.0+; the installer probes for them and aborts with a clear error if missing. |
 | Storage | At least 60 MiB free on `/opt`. Internal flash works (NC-2312 has ~98 MiB usable); a USB stick also works. |
 | Subscription | A v2ray-style subscription URL that returns a base64-encoded list of `vless://` / `vmess://` / `trojan://` / `ss://` URIs. |
 | LAN access | SSH connection to the router on **tcp/222** (dropbear) as `root`. |
@@ -95,18 +96,23 @@ The installer is interactive. It will ask for:
    re-runs you choose whether to keep it (recommended — preserves
    MetaCubeXD bookmarks) or regenerate.
 
-It then performs 8 steps:
+It then performs 9 steps:
 
 | | |
 |---|---|
 | 1 | preflight (Entware, curl) |
-| 2 | router IP |
-| 3 | subscription URL |
-| 4 | `opkg install sing-box-go python3 cron curl` |
-| 5 | Clash API secret (generate or reuse) |
-| 6 | download `S99singbox-healthcheck`, watchdog, `sub-refresh`, `sub_to_singbox.py` |
-| 7 | generate sing-box config + apply NDM `OpkgTun0` registration |
-| 8 | start services + smoke test |
+| 2 | NDM components — verify ndmc CLI, version ≥ 3.0, `object-group fqdn`, `dns-proxy` |
+| 3 | router IP |
+| 4 | subscription URL |
+| 5 | `opkg install sing-box-go python3 cron curl` |
+| 6 | Clash API secret (generate or reuse) |
+| 7 | download `S99singbox-healthcheck`, watchdog, `sub-refresh`, `sub_to_singbox.py` |
+| 8 | generate sing-box config + apply NDM `OpkgTun0` registration |
+| 9 | start services + smoke test |
+
+If step 2 finds something missing (e.g. `object-group fqdn` not
+supported on a stripped-down firmware), it aborts before touching any
+state — nothing has been installed at that point.
 
 When done it prints the MetaCubeXD URL and the path to your secret.
 
@@ -224,6 +230,10 @@ rm -rf /opt/etc/sing-box /opt/var/lib/sing-box /opt/share/sing-box
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | Installer fails at "Entware not detected" | OPKG component not enabled or not yet rebooted | Step 1 again |
+| Installer fails at "ndmc not responding" | Not actually a Keenetic, or NDM service crashed | Reboot the router; if persistent, this is not a Keenetic-class device |
+| Installer fails at "NDM X.Y is too old" | Firmware older than NDM 3.0 | Update via NDM web UI → System → Update; OpkgTun and `dns-proxy route ... auto reject` need 3.0+ |
+| Installer fails at "this NDM build does not support object-group fqdn" | Stripped-down or preview firmware | Switch to stable channel via NDM web UI → System → Update channel → "Release" |
+| Installer warns "dns-proxy not in running-config" | DNS proxy component disabled | NDM web UI → System settings → Component options → enable DNS proxy / Internet filter |
 | `opkg install sing-box-go` fails: not enough space | `/opt` partition full | `df -h /opt`; remove unused packages or move `/opt` to a USB stick |
 | `sing-box check` fails with "legacy DNS deprecated" / "block outbound removed" | `sub_to_singbox.py` is older than the sing-box build | Re-run installer (it pulls the latest converter) |
 | `opkgtun0` never gets an IP | `0xcffd009f` — kernel iface still held by sing-box | Installer handles this; if you ran `ndmc` manually, stop sing-box first |
