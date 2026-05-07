@@ -16,8 +16,9 @@ pip install -r requirements.txt   # paramiko + requests
 python deploy.py                  # uses ../.env, deploys everything
 ```
 
-`deploy.py` does §1–§6 below automatically. Read on for the manual
-runbook (useful for debugging or stepping through the install).
+`deploy.py` does §1–§6 below automatically. For a bare command-list
+without the running commentary, see `MANUAL_INSTALL.md`. Read on for
+the full runbook with rationale, gotchas, and troubleshooting.
 
 The end state: sing-box 1.13.x running as a daemon, exposing a TUN
 interface (`opkgtun0`, `172.19.0.1/32`), 42 v2ray outbounds parsed from a

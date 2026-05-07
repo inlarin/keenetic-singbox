@@ -22,7 +22,8 @@ keenetic-singbox/
 │   ├── udhcpc.vpn_redacted.script
 │   └── poc_opkgtap.sh
 ├── tests/                       pytest for kn_common helpers
-├── SINGBOX_SETUP.md             end-to-end deployment doc
+├── MANUAL_INSTALL.md            bare command list (alternative to deploy.py)
+├── SINGBOX_SETUP.md             full runbook with architecture + gotchas
 └── requirements.txt
 ```
 
@@ -38,8 +39,11 @@ python deploy.py
 `deploy.py` generates the sing-box config locally, pushes it + the
 router-side daemons, applies the NDM-side OpkgTun0 registration, and
 starts everything. Assumes Entware is already installed (run
-`kn_install_entware_step1.py` first if not). For step-by-step manual
-install see SINGBOX_SETUP.md.
+`kn_install_entware_step1.py` first if not).
+
+Prefer doing it by hand? See `MANUAL_INSTALL.md` — the same steps as a
+copy-paste command list, no Python deploy script. For deeper context
+(architecture, troubleshooting, NDM internals) see `SINGBOX_SETUP.md`.
 
 ## Credentials
 
