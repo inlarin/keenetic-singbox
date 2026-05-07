@@ -10,6 +10,21 @@ The two modes coexist on one router — sing-box owns `OpkgTun0`, this
 mode owns `Bridge2`, and NDM's `dns-proxy route object-group <X>
 {OpkgTun0|Bridge2} auto reject` decides which FQDN goes where.
 
+## TL;DR — interactive installer
+
+```sh
+ssh -p 222 root@<router-ip>
+curl -fsSL https://raw.githubusercontent.com/inlarin/keenetic-singbox/main/install-softether.sh | sh
+```
+
+`install-softether.sh` prompts for server / port / HUB / username /
+password / profile, then does the rest automatically (opkg install,
+`vpncmd` setup, NDM Bridge2, DHCP-based HUB gateway capture, conf-file
+write, watcher deployment).
+
+Read on for the manual procedure — useful for debugging or when you
+want to step through the install.
+
 > Note: all examples below use placeholders like `<router-lan-ip>`,
 > `<vpn-username>`, `vpn.example.com`, and `<profile>`. Replace with
 > your own values.

@@ -61,7 +61,8 @@ invariants, NAND wear-reduction) see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ```
 keenetic-singbox/
-├── install.sh                   ← interactive installer (curl|sh entry point)
+├── install.sh                   ← interactive sing-box installer (curl|sh entry point)
+├── install-softether.sh         ← interactive SoftEther bridge mode installer
 ├── sub_to_singbox.py            ← v2ray subscription → sing-box config
 ├── S99singbox-healthcheck       ← router init.d daemon
 ├── singbox-healthcheck-watchdog ← cron.1min watchdog
@@ -78,7 +79,19 @@ keenetic-singbox/
 ## Alternative: SoftEther Bridge2 mode
 
 If you'd rather route through a SoftEther server (different geography,
-existing SoftEther infra) instead of sing-box outbounds, see
-[`softether/README.md`](softether/README.md). The two modes can co-exist
-on the same router — sing-box owns `OpkgTun0`, SoftEther owns `Bridge2`,
-and NDM `dns-proxy route` decides which FQDN group goes where.
+existing SoftEther infra) instead of (or in addition to) sing-box
+outbounds, run the SoftEther installer in the same SSH session:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/inlarin/keenetic-singbox/main/install-softether.sh | sh
+```
+
+It's interactive — prompts for server / port / HUB / username / password
+/ profile, runs `vpncmd`, sets up NDM `Bridge2`, captures the HUB
+gateway via DHCP, deploys the watcher + DHCP scripts, and writes
+`/opt/etc/softether-bridge.conf`. The two modes coexist on one router —
+sing-box owns `OpkgTun0`, SoftEther owns `Bridge2`, and NDM `dns-proxy
+route` decides which FQDN group goes where.
+
+For the manual step-by-step (and the design reasoning) see
+[`softether/README.md`](softether/README.md).
