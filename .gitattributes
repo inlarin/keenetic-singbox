@@ -6,6 +6,7 @@ S05*                    text eol=lf
 singbox-healthcheck-*   text eol=lf
 sub-refresh             text eol=lf
 ndm_setup.cmd           text eol=lf
+install.sh              text eol=lf
 
 # Python and configs — let git auto-detect, but normalize on commit
 *.py                    text eol=lf

@@ -8,17 +8,19 @@ Keenetic with the `opkg` component enabled and Entware deployed.
 
 ## TL;DR — one-shot deploy
 
-If you have Entware up and an `.env` file with `ROUTER_HOST`,
-`ROUTER_PASS`, `SUBSCRIPTION_URL`, `SINGBOX_HEALTHCHECK_SECRET`:
+Run on the router itself (Entware must already be installed):
 
 ```sh
-pip install -r requirements.txt   # paramiko + requests
-python deploy.py                  # uses ../.env, deploys everything
+ssh -p 222 root@<router-ip>
+export SUBSCRIPTION_URL='https://<panel>/s/<token>'
+curl -fsSL https://raw.githubusercontent.com/inlarin/keenetic-singbox/main/install.sh | sh
 ```
 
-`deploy.py` does §1–§6 below automatically. For a bare command-list
-without the running commentary, see `MANUAL_INSTALL.md`. Read on for
-the full runbook with rationale, gotchas, and troubleshooting.
+`install.sh` does §1–§6 below automatically by fetching the rest of the
+scripts from the public repo. For workstation-side installs (no router
+internet), use `python deploy.py`. For a bare command list, see
+`MANUAL_INSTALL.md`. Read on for the full runbook with rationale,
+gotchas, and troubleshooting.
 
 The end state: sing-box 1.13.x running as a daemon, exposing a TUN
 interface (`opkgtun0`, `172.19.0.1/32`), 42 v2ray outbounds parsed from a

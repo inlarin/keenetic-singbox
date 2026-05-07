@@ -8,7 +8,8 @@ bridge for selective routing through `Bridge2`.
 
 ```
 keenetic-singbox/
-├── deploy.py                    one-shot install on a fresh router
+├── install.sh                   one-shot bootstrap (run on router via curl|sh)
+├── deploy.py                    workstation-side push installer (paramiko)
 ├── kn_common.py                 shared NDM CLI / SSH helpers
 ├── kn_*.py                      one-shot probe / apply / install scripts
 ├── sub_to_singbox.py            v2ray subscription -> sing-box config
@@ -29,21 +30,37 @@ keenetic-singbox/
 
 ## Quick start
 
+The simplest path runs entirely on the router — nothing pushed from a
+workstation. SSH in and pipe the bootstrap into `sh`:
+
 ```sh
-pip install -r requirements.txt    # paramiko + requests
-# Fill in ../.env (ROUTER_HOST, ROUTER_PASS, SUBSCRIPTION_URL,
-# SINGBOX_HEALTHCHECK_SECRET) — see .env.example
-python deploy.py
+ssh -p 222 root@<router-ip>
+export SUBSCRIPTION_URL='https://<panel>/s/<token>'
+curl -fsSL https://raw.githubusercontent.com/inlarin/keenetic-singbox/main/install.sh | sh
 ```
 
-`deploy.py` generates the sing-box config locally, pushes it + the
-router-side daemons, applies the NDM-side OpkgTun0 registration, and
-starts everything. Assumes Entware is already installed (run
-`kn_install_entware_step1.py` first if not).
+`install.sh` auto-detects the LAN IP, opkg-installs the prerequisites,
+fetches the rest of the scripts from this public repo, generates the
+sing-box config locally on the router, applies the NDM-side OpkgTun0
+registration via `ndmc`, and starts everything. Idempotent — re-run
+for upgrades. Assumes Entware is already installed (run
+`kn_install_entware_step1.py` from a workstation first if not).
 
-Prefer doing it by hand? See `MANUAL_INSTALL.md` — the same steps as a
-copy-paste command list, no Python deploy script. For deeper context
-(architecture, troubleshooting, NDM internals) see `SINGBOX_SETUP.md`.
+The healthcheck secret is generated on first run and persisted to
+`/opt/etc/sing-box/.healthcheck-secret`, so MetaCubeXD bookmarks
+survive re-runs.
+
+### Alternative install paths
+
+- **Workstation push (`deploy.py`)** — for offline installs or when
+  the router can't reach GitHub. Requires `paramiko` and an `.env`
+  file with `ROUTER_HOST`/`ROUTER_PASS`/`SUBSCRIPTION_URL`/
+  `SINGBOX_HEALTHCHECK_SECRET`. Pushes everything via SSH from the
+  workstation.
+- **Step-by-step (`MANUAL_INSTALL.md`)** — every command spelled out,
+  no installer.
+- **Full architectural runbook (`SINGBOX_SETUP.md`)** — the why behind
+  each step, gotchas, and troubleshooting.
 
 ## Credentials
 
