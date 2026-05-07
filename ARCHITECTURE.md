@@ -1,32 +1,19 @@
-# Sing-box on Keenetic NDM (aarch64 + Entware) — runbook
+# Architecture — sing-box on Keenetic NDM
 
-End-to-end install of sing-box as a second VPN client on a Keenetic-class
-router that already has Entware installed in internal flash. Tested on
-**Netcraze Hopper 4G+ (NC-2312), NDM 5.0.10, kernel 4.9 aarch64,
-Entware → /opt UBIFS, dropbear on tcp/222**. Should reproduce on any other
-Keenetic with the `opkg` component enabled and Entware deployed.
+Internals, design rationale, and operational behaviour of the deployed
+stack. For installation see [INSTALL.md](INSTALL.md); the runnable
+script is `install.sh`. This document is the **why** behind each
+piece, the gotchas we hit during build-out, and the resilience
+guarantees you get.
 
-## TL;DR — one-shot deploy
-
-Run on the router itself (Entware must already be installed):
-
-```sh
-ssh -p 222 root@<router-ip>
-export SUBSCRIPTION_URL='https://<panel>/s/<token>'
-curl -fsSL https://raw.githubusercontent.com/inlarin/keenetic-singbox/main/install.sh | sh
-```
-
-`install.sh` does §1–§6 below automatically by fetching the rest of the
-scripts from the public repo. For workstation-side installs (no router
-internet), use `python deploy.py`. For a bare command list, see
-`MANUAL_INSTALL.md`. Read on for the full runbook with rationale,
-gotchas, and troubleshooting.
-
-The end state: sing-box 1.13.x running as a daemon, exposing a TUN
-interface (`opkgtun0`, `172.19.0.1/32`), 42 v2ray outbounds parsed from a
-base64 subscription, MetaCubeXD web dashboard on
+End state: sing-box 1.13.x running as a daemon, exposing a TUN
+interface (`opkgtun0`, `172.19.0.1/32`), 42 v2ray outbounds parsed from
+a base64 subscription, MetaCubeXD web dashboard on
 `http://<router-lan-ip>:9090/ui/`, NDM keeps owning the routing tables
 (`auto_route` / `strict_route` are off so we don't fight `kn_gui`).
+
+Tested on **Netcraze Hopper 4G+ (NC-2312), NDM 5.0.10, kernel 4.9
+aarch64, Entware → /opt UBIFS, dropbear on tcp/222**.
 
 ## 0. Prerequisites
 

@@ -1,12 +1,8 @@
-# Runtime dependencies for the internal monitoring + Keenetic tooling.
-# The kn_gui/ subproject has its own (empty) runtime deps — it uses only
-# the Python stdlib. See kn_gui/requirements-dev.txt for test deps.
+# Workstation-side dev dependencies only. None of these run on the
+# router (the router uses /opt/bin/python3 + stdlib). Install if you
+# want to run diag/ utilities from your laptop, or test
+# sub_to_singbox.py locally before deploying.
 
-# HTTP client used by sub_to_singbox.py's IP→cc lookups.
-# Pinning to a minor series: we use only .get / .post / .Session — the
-# public API is stable, but a major bump can change TLS defaults.
+# HTTP client used by sub_to_singbox.py's optional IP→cc lookups when
+# run on a workstation. The router-side path uses urllib only.
 requests>=2.32.0,<3.0.0
-
-# SSH push pipeline used by deploy.py — dropbear on Keenetic has no SFTP,
-# so we base64-pipe files over an exec channel.
-paramiko>=3.0.0,<4.0.0

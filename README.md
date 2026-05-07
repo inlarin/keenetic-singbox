@@ -1,110 +1,71 @@
 # keenetic-singbox
 
-Toolkit for deploying and operating a sing-box VPN client on
-Keenetic Hopper 4G+ (NC-2312, NDM 5.0.10), with optional SoftEther
-bridge for selective routing through `Bridge2`.
+Sing-box VPN client for Keenetic-class routers — single-pool config
+with per-country routing pools, an honest healthcheck daemon, daily
+subscription refresh, and a fail-closed kill switch.
 
-## Layout
-
-```
-keenetic-singbox/
-├── install.sh                   one-shot bootstrap (run on router via curl|sh)
-├── deploy.py                    workstation-side push installer (paramiko)
-├── kn_common.py                 shared NDM CLI / SSH helpers
-├── kn_*.py                      one-shot probe / apply / install scripts
-├── sub_to_singbox.py            v2ray subscription -> sing-box config
-├── S99singbox-healthcheck       router-side init.d watchdog
-├── singbox-healthcheck-watchdog systemd-style supervisor
-├── sub-refresh.sh               periodic subscription refresh on router
-├── ndm_setup.cmd                OpkgTun0 NDM registration commands
-├── softether/                   SoftEther client + br2 bridge wrappers
-│   ├── S05vpnclient
-│   ├── udhcpc.br2.script
-│   ├── udhcpc.vpn_redacted.script
-│   └── poc_opkgtap.sh
-├── tests/                       pytest for kn_common helpers
-├── MANUAL_INSTALL.md            bare command list (alternative to deploy.py)
-├── SINGBOX_SETUP.md             full runbook with architecture + gotchas
-└── requirements.txt
-```
+Tested on **Netcraze Hopper 4G+ (NC-2312), NDM 5.0.10**. Should work on
+any Keenetic with the OPKG component and Entware deployed.
 
 ## Quick start
 
-The simplest path runs entirely on the router — nothing pushed from a
-workstation. SSH in and pipe the bootstrap into `sh`:
+SSH into the router and run the installer. It's interactive — it'll
+prompt for your subscription URL, auto-detect the LAN IP, and deploy
+everything.
 
 ```sh
 ssh -p 222 root@<router-ip>
-export SUBSCRIPTION_URL='https://<panel>/s/<token>'
 curl -fsSL https://raw.githubusercontent.com/inlarin/keenetic-singbox/main/install.sh | sh
 ```
 
-`install.sh` auto-detects the LAN IP, opkg-installs the prerequisites,
-fetches the rest of the scripts from this public repo, generates the
-sing-box config locally on the router, applies the NDM-side OpkgTun0
-registration via `ndmc`, and starts everything. Idempotent — re-run
-for upgrades. Assumes Entware is already installed (run
-`kn_install_entware_step1.py` from a workstation first if not).
+That's it. ~3 minutes later you'll get a MetaCubeXD URL and the API
+secret to paste into it.
 
-The healthcheck secret is generated on first run and persisted to
-`/opt/etc/sing-box/.healthcheck-secret`, so MetaCubeXD bookmarks
-survive re-runs.
+For the full step-by-step (with verification, FQDN pinning, removal,
+troubleshooting) see [INSTALL.md](INSTALL.md). For architecture deep
+dive (why single-pool, how the healthcheck daemon works, kill-switch
+invariants, NAND wear-reduction) see [ARCHITECTURE.md](ARCHITECTURE.md).
 
-### Alternative install paths
+## What you get
 
-- **Workstation push (`deploy.py`)** — for offline installs or when
-  the router can't reach GitHub. Requires `paramiko` and an `.env`
-  file with `ROUTER_HOST`/`ROUTER_PASS`/`SUBSCRIPTION_URL`/
-  `SINGBOX_HEALTHCHECK_SECRET`. Pushes everything via SSH from the
-  workstation.
-- **Step-by-step (`MANUAL_INSTALL.md`)** — every command spelled out,
-  no installer.
-- **Full architectural runbook (`SINGBOX_SETUP.md`)** — the why behind
-  each step, gotchas, and troubleshooting.
+- **sing-box 1.13** running as `/opt/etc/init.d/S99sing-box`, exposing
+  a TUN interface (`opkgtun0`) NDM treats as a managed iface.
+- **Per-country routing pools** — every server tagged stably as
+  `<cc>-<proto>-<host>-<port>-<transport>`. MetaCubeXD shows
+  `urltest-all`, per-country `urltest-tr` / `urltest-nl` / etc., and
+  every individual server for manual pinning.
+- **Healthcheck daemon** that probes through `opkgtun0` with real-data
+  100 KB downloads (not HEAD/204), rotates dead servers in ≤30 s,
+  re-ranks the full pool every 10 min, and survives provider key
+  rotations via auto-refresh.
+- **Daily subscription refresh** at 04:02 with stable cc-keyed cache
+  so server IPs that move between providers keep their slot.
+- **Kill switch** — `auto reject` on every `dns-proxy route` makes
+  tunneled traffic fail-closed when sing-box is down.
+- **MetaCubeXD** web UI auto-deployed at `http://<router-ip>:9090/ui/`.
 
-## Credentials
+## Repo layout
 
-All scripts read secrets from environment variables — nothing is
-hard-coded. Real values live one directory up in `../.env` (kept
-out of this repo).
-
-```sh
-set -a && source ../.env && set +a
+```
+keenetic-singbox/
+├── install.sh                   ← interactive installer (curl|sh entry point)
+├── sub_to_singbox.py            ← v2ray subscription → sing-box config
+├── S99singbox-healthcheck       ← router init.d daemon
+├── singbox-healthcheck-watchdog ← cron.1min watchdog
+├── sub-refresh.sh               ← cron.daily subscription refresh
+├── softether/                   ← optional SoftEther Bridge2 mode
+├── diag/                        ← Keenetic diag + utility scripts (NOT used by install)
+│   └── kn_*.py + tests/
+├── INSTALL.md                   ← step-by-step
+├── ARCHITECTURE.md              ← internals
+├── .env.example                 ← workstation-side env vars
+└── requirements.txt             ← workstation-only deps
 ```
 
-| Var | Purpose |
-|---|---|
-| `ROUTER_HOST` | Router IP (default `192.168.1.1`) |
-| `ROUTER_PORT` | NDM CLI telnet port (default `23`) |
-| `ROUTER_USER` | NDM login (default `admin`) |
-| `ROUTER_PASS` | NDM password — required |
-| `SUBSCRIPTION_URL` | hynet panel subscription URL (used by `deploy.py` and written to `/opt/etc/sing-box/.subscription-url` on the router) |
-| `SINGBOX_HEALTHCHECK_SECRET` | Clash API bearer token used by `sub_to_singbox.py` and the router-side healthcheck |
+## Alternative: SoftEther Bridge2 mode
 
-## Architecture
-
-See `SINGBOX_SETUP.md` for the full walk-through. Short version:
-
-- `sub_to_singbox.py` parses a v2ray-style base64 subscription and
-  emits a sing-box config with per-country routing pools — each
-  country gets its own `OpkgTunN` interface, urltest group, and
-  selector.
-- `S99singbox-healthcheck` runs on the router, probing the Clash API,
-  pinning `select.now`, and restarting sing-box on stall.
-- `softether/S05vpnclient` runs SoftEther client + `Bridge2` wrapper
-  so a watcher can patch NDM routing tables to send selected FQDNs
-  through SoftEther instead of sing-box.
-
-## Cross-repo dependencies
-
-- `kn_check_install.py` and `kn_probe_storage.py` import from
-  `kn_gui.rci_client` (a sibling project at
-  [keenetic-fqdn-manager](https://github.com/inlarin/keenetic-fqdn-manager)).
-  Clone it next to this repo and add the parent directory to
-  `PYTHONPATH` to use them.
-
-## Running tests
-
-```sh
-python -m pytest tests/
-```
+If you'd rather route through a SoftEther server (different geography,
+existing SoftEther infra) instead of sing-box outbounds, see
+[`softether/README.md`](softether/README.md). The two modes can co-exist
+on the same router — sing-box owns `OpkgTun0`, SoftEther owns `Bridge2`,
+and NDM `dns-proxy route` decides which FQDN group goes where.
