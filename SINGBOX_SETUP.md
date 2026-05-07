@@ -6,8 +6,21 @@ router that already has Entware installed in internal flash. Tested on
 Entware → /opt UBIFS, dropbear on tcp/222**. Should reproduce on any other
 Keenetic with the `opkg` component enabled and Entware deployed.
 
+## TL;DR — one-shot deploy
+
+If you have Entware up and an `.env` file with `ROUTER_HOST`,
+`ROUTER_PASS`, `SUBSCRIPTION_URL`, `SINGBOX_HEALTHCHECK_SECRET`:
+
+```sh
+pip install -r requirements.txt   # paramiko + requests
+python deploy.py                  # uses ../.env, deploys everything
+```
+
+`deploy.py` does §1–§6 below automatically. Read on for the manual
+runbook (useful for debugging or stepping through the install).
+
 The end state: sing-box 1.13.x running as a daemon, exposing a TUN
-interface (`tunhynet`, `172.19.0.1/30`), 42 v2ray outbounds parsed from a
+interface (`opkgtun0`, `172.19.0.1/32`), 42 v2ray outbounds parsed from a
 base64 subscription, MetaCubeXD web dashboard on
 `http://<router-lan-ip>:9090/ui/`, NDM keeps owning the routing tables
 (`auto_route` / `strict_route` are off so we don't fight `kn_gui`).
@@ -78,12 +91,19 @@ What the converter emits:
   everything else through `select`. `default_domain_resolver: local`
   silences the 1.13 deprecation warning.
 
-Generate a fresh API secret and bake it into the config:
+Generate a fresh API secret if you don't have one, then export so the
+converter picks it up via env (no editing source):
 
 ```sh
-python -c "import secrets; print(secrets.token_urlsafe(32))"
-# replace the placeholder in sub_to_singbox.py before running
+export SINGBOX_HEALTHCHECK_SECRET="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+export ROUTER_HOST=192.168.X.1   # your router's LAN IP
+python sub_to_singbox.py "$SUBSCRIPTION_URL" --out hynet_singbox.json --ndm-setup ndm_setup.cmd
 ```
+
+`sub_to_singbox.py` reads `SINGBOX_HEALTHCHECK_SECRET` and `ROUTER_HOST`
+from the environment (or `--secret` / `--router-ip` flags). Keep the
+real values in `monitoring/.env` — `keenetic-singbox/` itself never
+holds them.
 
 ## 3. Push config to the router
 
@@ -263,8 +283,13 @@ curl -4 https://ipinfo.io/ip            # → currently selected tunnel exit IP
 
 ## 6.2 Switch country (or specific server) via MetaCubeXD
 
-Open `http://192.168.1.1:9090/ui/`, authenticate (host
-`192.168.1.1:9090`, secret from `experimental.clash_api.secret`).
+Open `http://<router-lan-ip>:9090/ui/`, authenticate (host
+`<router-lan-ip>:9090`, secret from `experimental.clash_api.secret`).
+
+> **Clash API binding** — sing-box listens on `0.0.0.0:9090` so
+> MetaCubeXD is reachable from any LAN browser at `<router-lan-ip>:9090`,
+> while router-side scripts (healthcheck, sub-refresh) hit
+> `127.0.0.1:9090`. No router IP is hardcoded into either side.
 
 Click the `select` group → pick:
 | Option | Behaviour |
@@ -278,12 +303,12 @@ healthcheck daemon's auto-pin (§8) overrides this on every sweep — to
 keep a manual pin sticky, stop the daemon
 (`S99singbox-healthcheck stop`).
 
-## 6.2 Pin a specific outbound (override the auto-pick)
-
 ## 7. Subscription refresh
 
-Daily refresh script `/opt/etc/cron.daily/sub-refresh` (see
-`sub-refresh.sh` in the workstation repo). Requires Entware packages:
+Daily refresh script `/opt/etc/cron.daily/sub-refresh` (deployed from
+`sub-refresh.sh` in this repo). The subscription URL is read from
+`/opt/etc/sing-box/.subscription-url` (or the `SUBSCRIPTION_URL` env)
+— never hardcoded. Requires Entware packages:
 
 ```sh
 opkg install python3 python3-urllib python3-codecs cron curl
@@ -339,7 +364,8 @@ failures).
 
 ### Watchdog
 
-`/opt/etc/cron.1min/singbox-hc-watchdog` runs every minute. If the
+`/opt/etc/cron.1min/singbox-healthcheck-watchdog` (deployed from
+`singbox-healthcheck-watchdog` in this repo) runs every minute. If the
 daemon's PID file points at a dead process, the watchdog calls `start`
 to bring it back. Worst case downtime: 60 s.
 
@@ -356,7 +382,8 @@ If you want a sticky manual pin (e.g. testing one specific server),
 `stop` the daemon — otherwise auto-pin will overwrite it on the next
 sweep. **Note:** the watchdog will then bring it back within a minute.
 For long-term sticky pin, also disable the watchdog by `chmod -x
-/opt/etc/cron.1min/singbox-hc-watchdog` (and `chmod +x` to re-enable).
+/opt/etc/cron.1min/singbox-healthcheck-watchdog` (and `chmod +x` to
+re-enable).
 
 ### Resilience cheatsheet (recovery times)
 
@@ -438,14 +465,6 @@ NDM + everything else). Single-pool gvisor stack costs ~15 MiB; the
 per-country variant from 2026-04-27 burned ~60 MiB extra for the same
 end-user UX.
 
-RAM: sing-box RSS ~50-80 MiB with 6× gvisor TUN stacks. After healthcheck
-daemon + python3: total available drops from 247 MiB (clean Entware) to
-~190 MiB. Comfortable.
-
-RAM: sing-box RSS was ~25–35 MiB observed on idle (TUN system stack, not
-gVisor). `free -k` total available was 247 MiB before; expect ~210–220 MiB
-after sing-box + active connections.
-
 ## 10. Removing it
 
 NDM-side first (over telnet, repeat for every OpkgTunN registered):
@@ -461,7 +480,7 @@ system configuration save
 ```sh
 /opt/etc/init.d/S99singbox-healthcheck stop
 /opt/etc/init.d/S99sing-box stop
-rm /opt/etc/cron.1min/singbox-hc-watchdog
+rm /opt/etc/cron.1min/singbox-healthcheck-watchdog
 rm /opt/etc/cron.daily/sub-refresh
 rm /opt/etc/init.d/S99singbox-healthcheck
 opkg remove sing-box-go

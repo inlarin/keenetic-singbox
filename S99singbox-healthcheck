@@ -43,7 +43,7 @@ PID=/tmp/singbox-healthcheck.pid
 RANK=/tmp/singbox-server-ranking.json
 STATE_DIR=/tmp/singbox-state
 CONFIG=/opt/etc/sing-box/config.json
-CLASH_API=http://192.168.1.1:9090
+CLASH_API=http://127.0.0.1:9090
 
 # Single TUN inbound, single top-level selector. Both names are baked into
 # the converter (sub_to_singbox.py) and the SELECT_TAG must match what the

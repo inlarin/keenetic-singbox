@@ -20,12 +20,24 @@
 
 set -u
 
-URL='https://hynet.space/s/REDACTED-TOKEN-ROTATED'
+# Subscription URL: read from external file (deployed by install) or env.
+# Never hardcoded — keeps the token out of source control.
+URL_FILE=/opt/etc/sing-box/.subscription-url
+URL="${SUBSCRIPTION_URL:-}"
+if [ -z "$URL" ] && [ -f "$URL_FILE" ]; then
+    URL=$(cat "$URL_FILE")
+fi
+if [ -z "$URL" ]; then
+    echo "FAIL: no subscription URL (set SUBSCRIPTION_URL env or write $URL_FILE)" >&2
+    exit 3
+fi
+
 DIR=/opt/share/sing-box
 CONV="$DIR/sub_to_singbox.py"
 LOG=/tmp/sub-refresh.log              # tmpfs to spare NAND wear; rotates on reboot
 ACTIVE=/opt/etc/sing-box/config.json
 SECRET_FILE="$DIR/clash_secret"     # optional override; falls back to grep-from-config
+CLASH_API="${CLASH_API:-http://127.0.0.1:9090}"
 
 mkdir -p "$DIR"
 
@@ -99,7 +111,7 @@ if [ -n "$SECRET" ]; then
     # restart, no need to capture/restore them.
     for sel in select; do
         now=$(curl -fsS --max-time 5 -H "Authorization: Bearer $SECRET" \
-              "http://192.168.1.1:9090/proxies/${sel}" 2>/dev/null \
+              "${CLASH_API}/proxies/${sel}" 2>/dev/null \
               | sed 's/.*"now": *"//; s/".*//')
         [ -n "$now" ] && [ "$now" != "{" ] && echo "$sel $now" >> "$PICKS"
     done
@@ -134,7 +146,7 @@ if [ -n "$SECRET" ] && [ -s "$PICKS" ]; then
              -H "Authorization: Bearer $SECRET" \
              -H 'Content-Type: application/json' \
              -d "{\"name\":\"$tag\"}" \
-             "http://192.168.1.1:9090/proxies/${sel}" >/dev/null 2>&1 \
+             "${CLASH_API}/proxies/${sel}" >/dev/null 2>&1 \
              && log "restored $sel = $tag" \
              || log "could not restore $sel = $tag (tag gone?)"
     done < "$PICKS"

@@ -108,7 +108,7 @@ def main() -> int:
         print('  port 222 OPEN — dropbear is up')
     else:
         print('  port 222 closed — dropbear not yet started, may need more time or '
-              'manual start. Try `plink -ssh -P 222 root@192.168.1.1` in a minute.')
+              f'manual start. Try `plink -ssh -P 222 root@{args.host}` in a minute.')
     return 0
 
 

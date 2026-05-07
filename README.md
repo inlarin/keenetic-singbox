@@ -8,6 +8,7 @@ bridge for selective routing through `Bridge2`.
 
 ```
 keenetic-singbox/
+├── deploy.py                    one-shot install on a fresh router
 ├── kn_common.py                 shared NDM CLI / SSH helpers
 ├── kn_*.py                      one-shot probe / apply / install scripts
 ├── sub_to_singbox.py            v2ray subscription -> sing-box config
@@ -25,6 +26,21 @@ keenetic-singbox/
 └── requirements.txt
 ```
 
+## Quick start
+
+```sh
+pip install -r requirements.txt    # paramiko + requests
+# Fill in ../.env (ROUTER_HOST, ROUTER_PASS, SUBSCRIPTION_URL,
+# SINGBOX_HEALTHCHECK_SECRET) — see .env.example
+python deploy.py
+```
+
+`deploy.py` generates the sing-box config locally, pushes it + the
+router-side daemons, applies the NDM-side OpkgTun0 registration, and
+starts everything. Assumes Entware is already installed (run
+`kn_install_entware_step1.py` first if not). For step-by-step manual
+install see SINGBOX_SETUP.md.
+
 ## Credentials
 
 All scripts read secrets from environment variables — nothing is
@@ -41,6 +57,7 @@ set -a && source ../.env && set +a
 | `ROUTER_PORT` | NDM CLI telnet port (default `23`) |
 | `ROUTER_USER` | NDM login (default `admin`) |
 | `ROUTER_PASS` | NDM password — required |
+| `SUBSCRIPTION_URL` | hynet panel subscription URL (used by `deploy.py` and written to `/opt/etc/sing-box/.subscription-url` on the router) |
 | `SINGBOX_HEALTHCHECK_SECRET` | Clash API bearer token used by `sub_to_singbox.py` and the router-side healthcheck |
 
 ## Architecture

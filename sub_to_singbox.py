@@ -328,7 +328,8 @@ TUN_IP = "172.19.0.1"
 
 
 def build_config(outbounds: list[dict[str, Any]],
-                 clash_secret: str) -> dict[str, Any]:
+                 clash_secret: str,
+                 router_ip: str = "192.168.1.1") -> dict[str, Any]:
     """Single-pool config:
 
     * One TUN inbound (`opkgtun0`).
@@ -395,7 +396,7 @@ def build_config(outbounds: list[dict[str, Any]],
         "dns": {
             "servers": [
                 {"type": "udp", "tag": "remote", "server": "1.1.1.1", "detour": "select"},
-                {"type": "udp", "tag": "local", "server": "192.168.1.1"},
+                {"type": "udp", "tag": "local", "server": router_ip},
             ],
             "rules": [
                 {"clash_mode": "direct", "server": "local"},
@@ -437,7 +438,11 @@ def build_config(outbounds: list[dict[str, Any]],
             # обходится дешёво по сравнению с UBIFS write wear.
             "cache_file": {"enabled": True, "path": "/tmp/sing-box-cache.db"},
             "clash_api": {
-                "external_controller": "192.168.1.1:9090",
+                # Bind on all interfaces so MetaCubeXD is reachable from LAN
+                # at <router-ip>:9090 and router-side scripts (healthcheck,
+                # sub-refresh) can hit 127.0.0.1:9090 — both work without
+                # baking a router-specific IP into the config.
+                "external_controller": "0.0.0.0:9090",
                 "secret": clash_secret,
                 "external_ui": "/opt/share/sing-box/ui",
                 "external_ui_download_url":
@@ -484,6 +489,8 @@ def main() -> int:
     ap.add_argument("--ndm-setup", help="also emit ndmc registration commands to this path")
     ap.add_argument("--secret", default=DEFAULT_SECRET,
                     help="Clash API bearer token (env: SINGBOX_HEALTHCHECK_SECRET)")
+    ap.add_argument("--router-ip", default=os.environ.get("ROUTER_HOST", "192.168.1.1"),
+                    help="Router LAN IP — baked into the local DNS server tag (env: ROUTER_HOST)")
     args = ap.parse_args()
 
     text = open(args.file).read() if args.file else fetch(args.url)
@@ -500,7 +507,7 @@ def main() -> int:
         n = sum(1 for o in obs if o["_cc"] == cc)
         print(f"      {cc}: {n} outbounds", file=sys.stderr)
 
-    cfg = build_config(obs, args.secret)
+    cfg = build_config(obs, args.secret, router_ip=args.router_ip)
     js = json.dumps(cfg, ensure_ascii=False, indent=2)
     if args.out == "-":
         sys.stdout.write(js)
