@@ -20,9 +20,12 @@ From your workstation:
 ssh -p 222 root@<router-ip>
 ```
 
-You're now in the router's shell. Run:
+You're now in the router's shell. Bootstrap `curl` (not in base
+Entware — opkg is idempotent so this is a no-op on re-runs), then run
+the installer:
 
 ```sh
+opkg update && opkg install curl
 curl -fsSL https://raw.githubusercontent.com/inlarin/keenetic-singbox/main/install.sh | sh
 ```
 

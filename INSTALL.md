@@ -73,11 +73,18 @@ over the NDM telnet CLI.)
 ssh -p 222 root@<router-ip>
 ```
 
-**On the router** (you'll see the `Hopper4G+ #` prompt):
+**On the router** (you'll see the `Hopper4G+ #` prompt). The base
+Entware install ships only `opkg` and busybox basics — `curl` isn't
+included and the busybox `wget` you'd find in `/sbin` segfaults on
+chunked HTTPS. So bootstrap `curl` first, then fetch the installer:
 
 ```sh
+opkg update && opkg install curl
 curl -fsSL https://raw.githubusercontent.com/inlarin/keenetic-singbox/main/install.sh | sh
 ```
+
+`opkg install` is idempotent, so this two-step pattern is safe to
+re-run when you want to upgrade later.
 
 The installer is interactive. It will ask for:
 
