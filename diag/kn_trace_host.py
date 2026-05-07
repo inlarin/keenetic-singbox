@@ -7,9 +7,9 @@ IP used by the router — which distinguishes VPN egress (SSTP0 local IP)
 from the normal PPPoE WAN.
 
 Usage:
-    ROUTER_PASS='...' python kn_trace_host.py --host 192.168.X.10
-    python kn_trace_host.py --host 192.168.X.10 --rdns --top 30
-    python kn_trace_host.py --host 192.168.X.10 --vpn-local-ip 10.X.0.10
+    ROUTER_PASS='...' python kn_trace_host.py --host <lan-client-ip>
+    python kn_trace_host.py --host <lan-client-ip> --rdns --top 30
+    python kn_trace_host.py --host <lan-client-ip> --vpn-local-ip <vpn-local-ip>
 """
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ if sys.platform == "win32" and not getattr(sys.stdout, "_utf8", False):
 
 # `show ip nat` line shape (column-aligned):
 #   Type | In  | Source           Port     Destination      Port     Packets
-#   UDP          192.168.X.10    28328    203.0.113.1   55899    3394
+#   UDP          <lan-client-ip>  28328    <upstream-ip>    55899    3394
 #
 # Each "translation" = two rows (forward + reverse), separated by `---`.
 # We only care about the forward row: src is LAN IP, and the reverse row's
@@ -253,7 +253,7 @@ def render_report(host_ip: str, flows: list[dict], vpn_local_ip: str,
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Trace connections of a single LAN host via NAT")
-    ap.add_argument("--host", required=True, help="LAN IP of the client (e.g. 192.168.X.10)")
+    ap.add_argument("--host", required=True, help="LAN IP of the client to trace")
     ap.add_argument("--router", default=os.environ.get("ROUTER_HOST", DEFAULT_HOST))
     ap.add_argument("--user", default=os.environ.get("ROUTER_USER", DEFAULT_USER))
     ap.add_argument("--vpn-iface", default="SSTP0")

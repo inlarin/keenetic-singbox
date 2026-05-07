@@ -3,9 +3,9 @@
 #
 # Variables exported by busybox udhcpc on bound/renew:
 #   $interface  - iface name (here always br2)
-#   $ip         - leased address (e.g. 10.X.0.11)
-#   $subnet     - dotted netmask (e.g. 255.255.255.0)
-#   $router     - HUB gateway (e.g. 10.X.0.1) — referenced by S05vpnclient as $HUB_GW
+#   $ip         - leased address (HUB DHCP-assigned)
+#   $subnet     - dotted netmask (typically 255.255.255.0)
+#   $router     - HUB gateway — referenced by S05vpnclient as $HUB_GW
 #   $dns        - server-supplied DNS list (intentionally NOT applied; the router
 #                 already has its own dns-proxy and we don't want HUB DNS to override)
 #

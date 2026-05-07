@@ -5,10 +5,10 @@
 #   - `interface Bridge2 ... up` (Bridge2 noun + Linux br2)
 #   - `dns-proxy route object-group <X> Bridge2 auto reject` rules):
 #
-#   1. vpnclient daemon starts → softether tunnel up → `vpn_redacted` TAP appears
+#   1. vpnclient daemon starts → softether tunnel up → $VPN_IFACE TAP appears
 #   2. NDM brings up `Bridge2` (Linux br2) per startup-config
 #   3. The watcher loop keeps the integration glued together:
-#        a. `brctl addif br2 vpn_redacted` — bridge softether tunnel into NDM Bridge2 (Linux level).
+#        a. `brctl addif br2 $VPN_IFACE` — bridge softether tunnel into NDM Bridge2 (Linux level).
 #        b. `udhcpc -i br2` — fetch IP from softether HUB. NDM doesn't run DHCP on Bridge2
 #           (no NDM-known active member), so we do it ourselves.
 #        c. POSTROUTING SNAT to br2's IP — HUB only knows DHCP-assigned IP, not Bridge2 stub.
@@ -18,26 +18,43 @@
 #
 # Manual trigger: /opt/etc/init.d/S05vpnclient patch-now (re-run all glue steps once).
 # Status:        /opt/etc/init.d/S05vpnclient status
+#
+# Configuration: edit /opt/etc/softether-bridge.conf with VPN_IFACE and HUB_GW
+# before starting this service. See softether/README.md.
 
 PATH=/opt/sbin:/opt/bin:/opt/usr/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export GCONV_PATH=/opt/lib/gconv
 
 VPNCLIENT=/opt/libexec/softethervpn/vpnclient
-VPN_IFACE=vpn_redacted
-NDM_BRIDGE=br2          # kernel/Linux bridge name
-NDM_BRIDGE_NAME=Bridge2 # NDM CLI noun (running-config uses this)
-HUB_GW=10.X.0.1
+CONF_FILE=/opt/etc/softether-bridge.conf
+
+# Defaults match the README's worked example. Override in $CONF_FILE.
+VPN_IFACE=vpnclient_tap   # SoftEther TAP iface (kernel name `vpn_<NicName>`)
+NDM_BRIDGE=br2            # kernel/Linux bridge name
+NDM_BRIDGE_NAME=Bridge2   # NDM CLI noun (running-config uses this)
+HUB_GW=                   # MUST be set in $CONF_FILE — gateway your HUB hands out
+
+if [ -f "$CONF_FILE" ]; then
+    # shellcheck disable=SC1090
+    . "$CONF_FILE"
+fi
+
+if [ -z "$HUB_GW" ]; then
+    echo "FAIL: HUB_GW not set. Edit $CONF_FILE — see softether/README.md." >&2
+    exit 2
+fi
+
 DHCP_SCRIPT=/opt/etc/udhcpc.${NDM_BRIDGE}.script
 WATCHER_PID=/opt/var/run/${VPN_IFACE}_watcher.pid
 
 # Two cadences:
 #   WATCHER_INTERVAL — lightweight glue (bridge member, DHCP, SNAT) every 10 s.
 #   PATCH_INTERVAL_TICKS — heavy patch_routing_tables (which calls
-#     `ndmc show running-config` and parses 33+ groups) every 6 ticks = 60 s.
-#   The heavy step is what was contending with kn_gui apply: NDM briefly locks
-#     config while serving the show, and concurrent writes from the GUI hit
-#     timeouts. Spacing it out makes the contention window negligible.
-#   Use `patch-now` action right after a kn_gui apply if you don't want to
+#     `ndmc show running-config` and parses bound groups) every 6 ticks = 60 s.
+#   The heavy step contends with concurrent NDM writers (e.g. kn_gui apply):
+#     NDM briefly locks config while serving the show, and concurrent writes
+#     hit timeouts. Spacing it out makes the contention window negligible.
+#   Use `patch-now` action right after a config change if you don't want to
 #     wait up to 60 s for the watcher to catch up.
 WATCHER_INTERVAL=10
 PATCH_INTERVAL_TICKS=6

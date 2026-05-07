@@ -73,9 +73,9 @@ What the converter emits:
 - **TUN inbound** `tunhynet`, `172.19.0.1/30`, MTU 1420, `auto_route: false`,
   `strict_route: false`, `stack: system`. Critical: NDM keeps owning all
   routing tables and policy rules — sing-box just publishes an interface.
-- **DNS**: local domains via `192.168.1.1` (the router's NDM dns-proxy),
+- **DNS**: local domains via `<router-lan-ip>` (the router's NDM dns-proxy),
   everything else via `1.1.1.1` through `select`.
-- **Clash API** on `192.168.1.1:9090` with bearer-token auth and
+- **Clash API** on `0.0.0.0:9090` (reachable from LAN at `<router-lan-ip>:9090`) with bearer-token auth and
   `external_ui` pointing at MetaCubeXD (auto-downloaded on first start).
 - **`route`** rules: hijack DNS to sing-box, bypass private nets to direct,
   everything else through `select`. `default_domain_resolver: local`
@@ -112,7 +112,7 @@ def push(c, local, remote):
     ch.shutdown_write(); ch.recv_exit_status()
 
 c = paramiko.SSHClient(); c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-c.connect('192.168.1.1', port=222, username='root',
+c.connect(os.environ['ROUTER_HOST'], port=222, username='root',
           password=os.environ['ROUTER_PASS'],
           allow_agent=False, look_for_keys=False)
 push(c, 'hynet_singbox.json', '/opt/etc/sing-box/config.json')
@@ -148,7 +148,7 @@ netstat -tln | grep 9090
 Expected:
 - one `sing-box run -D /opt/var/lib/sing-box -C /opt/etc/sing-box` process,
 - `opkgtun0` interface UP with `172.19.0.1/32`,
-- `192.168.1.1:9090` LISTEN.
+- `0.0.0.0:9090` LISTEN (reachable as `<router-lan-ip>:9090` from LAN).
 
 **Critical config alignment:** the converter sets `interface_name: "opkgtun0"`
 and `address: ["172.19.0.1/32"]`. Both are required for NDM-side registration
@@ -286,7 +286,7 @@ Click the `select` group → pick:
 |---|---|
 | `urltest-all` | Sing-box auto-best across all 42 servers (note: HEAD-probe-based, not always honest — see §8) |
 | `urltest-tr` / `-us` / `-de` / `-nl` / `-gb` / `-ru` | Sing-box auto-best inside one country |
-| `tr-vless-198.51.100.2-2053-grpc` (or any other tag) | Manual pin to a specific server |
+| `<cc>-<proto>-<host>-<port>-<transport>` (any individual server tag) | Manual pin to a specific server |
 
 Persists across sing-box restarts via `experimental.cache_file`. The
 healthcheck daemon's auto-pin (§8) overrides this on every sweep — to

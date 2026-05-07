@@ -1,20 +1,20 @@
 #!/bin/sh
-# udhcpc lease handler for vpn_redacted. Called by busybox udhcpc with $1 set
-# to one of: deconfig | bound | renew | leasefail | nak.
+# udhcpc lease handler for the SoftEther TAP interface. Called by busybox
+# udhcpc with $1 set to one of: deconfig | bound | renew | leasefail | nak.
 #
 # Variables exported by udhcpc on bound/renew:
-#   $interface  - iface name (here always vpn_redacted)
+#   $interface  - iface name (the TAP, e.g. vpn_<NicName>)
 #   $ip         - leased address
-#   $subnet     - dotted netmask (e.g. 255.255.255.0)
-#   $router     - HUB gateway (e.g. 10.X.0.1)
+#   $subnet     - dotted netmask (typically 255.255.255.0)
+#   $router     - HUB gateway
 #   $dns        - server-supplied DNS list (we ignore — we don't want to
 #                 hijack system DNS)
 #
 # We deliberately do NOT add a default route; selective routing through this
-# tunnel is configured externally with explicit `ip route add ... dev
-# vpn_redacted via $router` rules so that only the chosen traffic uses the VPN.
+# tunnel is configured externally with explicit `ip route add ... dev <iface>
+# via $router` rules so that only the chosen traffic uses the VPN.
 
-LOG_TAG=udhcpc-vpn_redacted
+LOG_TAG=udhcpc-vpn
 
 case "$1" in
     deconfig)

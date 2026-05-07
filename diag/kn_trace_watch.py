@@ -9,8 +9,8 @@ long as the flow stays alive. Deltas between snapshots give rate; flows
 that expire just drop out of the table.
 
 Usage:
-    ROUTER_PASS='...' python kn_trace_watch.py --host 192.168.X.10
-    python kn_trace_watch.py --host 192.168.X.10 --interval 5 --duration 60 --rdns
+    ROUTER_PASS='...' python kn_trace_watch.py --host <lan-client-ip>
+    python kn_trace_watch.py --host <lan-client-ip> --interval 5 --duration 60 --rdns
 """
 from __future__ import annotations
 

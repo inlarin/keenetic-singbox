@@ -1,139 +1,149 @@
-# SoftEther через NDM Bridge2 — установка и эксплуатация
+# SoftEther via NDM Bridge2 — install + operate
 
-Полная инструкция по установке Entware и SoftEther client во встроенную
-память Keenetic-роутера (Netcraze Hopper 4G+ NC-2312, прошивка 5.0.10),
-интеграции с NDM `dns-proxy route` через Bridge-обёртку и работе через
-`kn_gui`. Всё проверено end-to-end, вы ходит ребут.
+Alternative routing mode for the same Keenetic stack: instead of (or in
+addition to) sing-box's `OpkgTun0`, route selected FQDN groups through a
+SoftEther HUB via NDM's `Bridge2`. Useful when the egress you want is a
+SoftEther server (existing infra, specific geography), not one of the
+sing-box outbounds.
 
-> Подробности «почему именно так» — см. соседний файл с проектной памятью
-> [`project_softether_bridge_routing.md`](../../.claude/projects/...).
-> Здесь — оперативный how-to.
+The two modes coexist on one router — sing-box owns `OpkgTun0`, this
+mode owns `Bridge2`, and NDM's `dns-proxy route object-group <X>
+{OpkgTun0|Bridge2} auto reject` decides which FQDN goes where.
+
+> Note: all examples below use placeholders like `<router-lan-ip>`,
+> `<vpn-username>`, `vpn.example.com`, and `<profile>`. Replace with
+> your own values.
 
 ---
 
-## Архитектура (одной картинкой)
+## Architecture (one diagram)
 
 ```
-LAN-клиент (192.168.32.X)
+LAN client (<router-lan-subnet>.X)
   │
-  │ DNS на 192.168.1.1 → NDM dnsmasq резолвит FQDN из object-group
-  │ NDM кладёт IP в ipset _NDM_OGDN_4_@<group>
+  │ DNS to <router-lan-ip> → NDM dnsmasq resolves FQDN from object-group
+  │ NDM populates ipset _NDM_OGDN_4_@<group>
   │
-  │ HTTP/etc. пакет к публичному IP
+  │ HTTP/etc. packet to public IP
   ▼
 Router (NDM)
-  │ iptables -t mangle PREROUTING: match-set ipset → MARK 0xffffXXX
+  │ iptables -t mangle PREROUTING: ipset match → MARK 0xffffXXX
   │ ip rule:    fwmark 0xffffXXX → table N
-  │ table N:    default via 10.X.0.1 dev br2     ← патчит наш watcher
+  │ table N:    default via <hub-gateway> dev br2     ← patched by S05vpnclient
   ▼
 br2 (NDM Bridge2, Linux bridge)
-  │ iptables -t nat POSTROUTING -o br2 → SNAT to 10.X.0.11
+  │ iptables -t nat POSTROUTING -o br2 → SNAT to <hub-leased-ip>
   ▼
-vpn_redacted (softether TAP, член br2)
-  │ vpnclient (Entware) → SSL на TCP/443
+vpn_<profile> (SoftEther TAP, member of br2)
+  │ vpnclient (Entware) → SSL/TLS to TCP/443
   ▼
-vpn.example.com  (HUB="VPN", user "vpn-user-redacted")
+vpn.example.com  (HUB="<HUB-name>", user "<vpn-username>")
   │
   ▼
-интернет (Dallas exit IP)
+internet (HUB exit IP)
 ```
 
 ---
 
-## Предусловия (один раз через Web-GUI)
+## Prerequisites (one-time, NDM web UI)
 
-В Web-интерфейсе роутера → **Параметры системы → Изменение набора
-компонентов** включить компоненты и применить (роутер ребутнётся):
+In the router's web UI → **System settings → Component options**, enable
+and apply (router will reboot):
 
-- **OPKG** — пакетный менеджер
-- **Ext-файловая система**
-- **OpenVPN client** — на этой прошивке без него NDM не создаёт kernel-side
-  TAP/TUN устройства корректно, и наша связка не работает
-- *(опционально)* DNS-over-TLS / DNS-over-HTTPS proxy — независимо
+- **OPKG** — package manager
+- **Ext file system**
+- **OpenVPN client** — on this firmware family, NDM does not create
+  kernel-side TAP/TUN devices correctly without it, and our setup won't
+  work
+- *(optional)* DNS-over-TLS / DNS-over-HTTPS proxy — independent
 
-После reboot проверить через telnet (`telnet admin@192.168.1.1`):
+After reboot, verify via NDM telnet (`telnet admin@<router-lan-ip>`):
+
 ```
 show version
-# components: ...,openvpn,opkg,...   ← оба должны быть
+# components: ...,openvpn,opkg,...   ← both must be present
 ```
 
 ---
 
-## Шаг 1. Entware в NAND
+## Step 1 — Entware in NAND
 
-Через NDM CLI (telnet, не через SSH/Entware — его ещё нет):
+Via NDM CLI (telnet — Entware/SSH isn't up yet):
+
 ```
 opkg disk storage:/ https://bin.entware.net/aarch64-k3.10/installer/aarch64-installer.tar.gz
 system configuration save
 system reboot
 ```
 
-После ребута на TCP/222 поднимется dropbear (`root` / `keenetic`):
+After reboot dropbear listens on tcp/222 (factory default password from
+Keenetic docs):
+
 ```
-plink -ssh -P 222 -pw keenetic -batch root@192.168.1.1 'opkg update'
+ssh -p 222 root@<router-lan-ip> 'opkg update'
 ```
 
 ---
 
-## Шаг 2. SoftEther client + базовые зависимости
+## Step 2 — SoftEther client + base deps
 
-```
-ssh -p 222 root@192.168.1.1     # initial password: factory default (Keenetic docs)
-# рекомендую passwd сменить сразу: passwd
+```sh
+ssh -p 222 root@<router-lan-ip>     # change the default password on first login: passwd
 
 opkg install softethervpn5-libs softethervpn5-client \
              iptables ipset ip-full
 ```
 
-Размер ≈ 50 МБ. После установки `ls /opt/etc/init.d/` уже содержит
-`S05vpnclient` (положен пакетом).
+About 50 MB. After install `ls /opt/etc/init.d/` already contains
+`S05vpnclient` (placed by the package — we'll replace it with our
+NDM-aware variant in step 5).
 
 ---
 
-## Шаг 3. SoftEther account через `vpncmd`
+## Step 3 — SoftEther account via `vpncmd`
 
-> Особенность: `vpncmd /CMD ...` принимает аргументы как отдельные
-> argv-токены. Не оборачивай команду целиком в кавычки — они попадут в
-> имя команды и vpncmd ругнётся `Command not found`. Также в Git-Bash
-> ставь префикс `MSYS_NO_PATHCONV=1` чтобы пути типа `/CMD` не
-> преобразовались в Windows-формат.
+> Quirks: `vpncmd /CMD ...` takes arguments as separate argv tokens.
+> Don't quote the whole command — quotes end up in the command name and
+> vpncmd reports `Command not found`. In Git-Bash on Windows, prefix
+> the call with `MSYS_NO_PATHCONV=1` so paths like `/CMD` aren't
+> rewritten to Windows form.
 
-```bash
-# 1. Создать виртуальный TAP "dallas" → Linux получит vpn_redacted
-vpncmd /CLIENT localhost /CMD NicCreate dallas
+```sh
+# 1. Create a virtual TAP named <profile> → kernel iface vpn_<profile>
+vpncmd /CLIENT localhost /CMD NicCreate <profile>
 
-# 2. Создать VPN connection setting
-vpncmd /CLIENT localhost /CMD AccountCreate dallas \
+# 2. Create the VPN connection setting
+vpncmd /CLIENT localhost /CMD AccountCreate <profile> \
    /SERVER:vpn.example.com:443 \
-   /HUB:VPN \
-   /USERNAME:vpn-user-redacted \
-   /NICNAME:dallas
+   /HUB:<HUB-name> \
+   /USERNAME:<vpn-username> \
+   /NICNAME:<profile>
 
-# 3. Поставить пароль (стандартная password-аутентификация)
-vpncmd /CLIENT localhost /CMD AccountPasswordSet dallas \
+# 3. Set the password (standard password authentication)
+vpncmd /CLIENT localhost /CMD AccountPasswordSet <profile> \
    /PASSWORD:<your_password> /TYPE:standard
 
-# 4. Включить автоконнект при старте daemon (это важно — иначе после
-#    reboot vpnclient запустится но НЕ подключится)
-vpncmd /CLIENT localhost /CMD AccountStartupSet dallas
+# 4. Enable autoconnect on daemon start (important — otherwise after
+#    reboot vpnclient will be running but disconnected)
+vpncmd /CLIENT localhost /CMD AccountStartupSet <profile>
 
-# 5. Подключиться сейчас
-vpncmd /CLIENT localhost /CMD AccountConnect dallas
+# 5. Connect now
+vpncmd /CLIENT localhost /CMD AccountConnect <profile>
 sleep 5
-vpncmd /CLIENT localhost /CMD AccountStatusGet dallas
-# Session Status должен быть "Connection Completed (Session Established)"
+vpncmd /CLIENT localhost /CMD AccountStatusGet <profile>
+# Session Status should be "Connection Completed (Session Established)"
 ```
 
-После этого в Linux есть `vpn_redacted` TAP с `<UP,LOWER_UP>`, но **без
-IPv4** — DHCP делает наш watcher (см. шаг 5).
+Linux now has `vpn_<profile>` TAP with `<UP,LOWER_UP>`, but **without
+IPv4** — DHCP is handled by our watcher (step 5).
 
 ---
 
-## Шаг 4. NDM Bridge2 (через telnet)
+## Step 4 — NDM Bridge2 (telnet)
 
 ```
 ndmc -c "interface Bridge2"
-ndmc -c "interface Bridge2 description \"SoftEther vpn_redacted via L2 bridge\""
+ndmc -c "interface Bridge2 description \"SoftEther vpn_<profile> via L2 bridge\""
 ndmc -c "interface Bridge2 role misc"
 ndmc -c "interface Bridge2 security-level public"
 ndmc -c "interface Bridge2 ip mtu 1500"
@@ -143,136 +153,156 @@ ndmc -c "interface Bridge2 up"
 system configuration save
 ```
 
-> NDM создаст kernel-side bridge `br2`. Включать в него `vpn_redacted` через
-> `ndmc include` нельзя — `vpn_redacted` не NDM-known. Это сделает наш
-> watcher через `brctl`.
+> NDM creates the kernel-side bridge `br2`. You **cannot** add
+> `vpn_<profile>` to it via `ndmc include` — the TAP is not an
+> NDM-known iface. The watcher does that via `brctl`.
 
 ---
 
-## Шаг 5. Watcher: S05vpnclient + udhcpc.br2.script
+## Step 5 — Watcher: S05vpnclient + udhcpc.br2.script + conf
 
-Залить два файла из этой папки на роутер:
+First, write the local conf with your specific values:
 
-```bash
-# Из локальной machine (где лежит этот repo):
-pscp -scp -P 222 -pw <dropbear_pass> -batch \
-     softether/S05vpnclient root@192.168.1.1:/opt/etc/init.d/S05vpnclient
-pscp -scp -P 222 -pw <dropbear_pass> -batch \
-     softether/udhcpc.br2.script root@192.168.1.1:/opt/etc/udhcpc.br2.script
-
-# На роутере:
-ssh -p 222 root@192.168.1.1 \
-    'chmod +x /opt/etc/init.d/S05vpnclient /opt/etc/udhcpc.br2.script
-     /opt/etc/init.d/S05vpnclient restart'
+```sh
+ssh -p 222 root@<router-lan-ip> 'cat > /opt/etc/softether-bridge.conf <<EOF
+VPN_IFACE=vpn_<profile>
+HUB_GW=<hub-gateway>
+EOF
+chmod 600 /opt/etc/softether-bridge.conf'
 ```
 
-Через 10–20 сек watcher сделает:
+Where:
+- `VPN_IFACE` — the kernel TAP name from `vpncmd NicCreate <profile>`,
+  i.e. `vpn_<profile>`.
+- `HUB_GW` — the gateway your HUB hands out via DHCP (typically a
+  private subnet's `.1`). Run a quick `udhcpc -i br2 -s
+  /opt/etc/udhcpc.br2.script` to find out what your HUB serves; the
+  log line will contain `router=<gateway>`.
 
-1. `brctl addif br2 vpn_redacted` — softether-туннель в NDM-bridge
-2. `udhcpc -i br2` — IP `192.168.30.X` от HUB
-3. `iptables -t nat POSTROUTING -o br2 SNAT --to-source <ip>`
-4. Пройдётся по всем `dns-proxy route ... Bridge2` группам и добавит
-   `default via 10.X.0.1 dev br2 table N` в каждую table
+Then upload the watcher and DHCP scripts from this folder:
 
-Дальше — через kn_gui (см. ниже) или ручными `dns-proxy route` команды
-ты привязываешь любые FQDN-группы к `Bridge2`.
+```sh
+# From your workstation (in keenetic-singbox/softether/):
+scp -P 222 S05vpnclient        root@<router-lan-ip>:/opt/etc/init.d/S05vpnclient
+scp -P 222 udhcpc.br2.script   root@<router-lan-ip>:/opt/etc/udhcpc.br2.script
+scp -P 222 udhcpc.vpn.script   root@<router-lan-ip>:/opt/etc/udhcpc.vpn.script
+
+# On the router:
+ssh -p 222 root@<router-lan-ip> '
+    chmod +x /opt/etc/init.d/S05vpnclient \
+             /opt/etc/udhcpc.br2.script \
+             /opt/etc/udhcpc.vpn.script
+    /opt/etc/init.d/S05vpnclient restart
+'
+```
+
+(If your dropbear doesn't ship SFTP, replace `scp` with the base64-pipe
+trick used in the main installer — `cat foo | ssh ... 'base64 -d > foo'`.)
+
+Within 10–20 s the watcher will:
+
+1. `brctl addif br2 vpn_<profile>` — bridge SoftEther tunnel into the NDM bridge
+2. `udhcpc -i br2` — get an IP from the HUB
+3. Install `iptables -t nat POSTROUTING -o br2 SNAT --to-source <leased-ip>`
+4. Walk every `dns-proxy route ... Bridge2` group and add
+   `default via <hub-gateway> dev br2 table N` to that group's table
+
+After that you can use `kn_gui` (below) or raw `dns-proxy route`
+commands to bind any FQDN groups to `Bridge2`.
 
 ---
 
-## Эксплуатация
+## Operating it
 
-### Через kn_gui
+### Via kn_gui
 
-1. Установить v3.5.3+ — `https://github.com/inlarin/keenetic-fqdn-manager/releases/latest`
-2. Подключиться → в выпадающем списке выбрать **`Bridge2 — SoftEther
-   vpn_redacted via L2 bridge`**
-3. Поставить галочки на нужных сервисах → **Применить**
-4. После apply — на роутере:
+1. Install v3.5.3+ from
+   [keenetic-fqdn-manager releases](https://github.com/inlarin/keenetic-fqdn-manager/releases/latest).
+2. Connect → in the interface dropdown pick **`Bridge2 — SoftEther
+   vpn_<profile> via L2 bridge`**.
+3. Tick the services you want → **Apply**.
+4. Then on the router:
 
-   ```bash
-   ssh -p 222 root@192.168.1.1 'service S05vpnclient patch-now'
+   ```sh
+   ssh -p 222 root@<router-lan-ip> 'service S05vpnclient patch-now'
    ```
 
-   Это патчит routing tables новых групп немедленно (иначе watcher
-   сам подхватит за 60 сек).
+   This patches new groups' routing tables immediately (otherwise the
+   watcher catches up within 60 s).
 
-### Через CLI вручную
+### Via NDM CLI manually
 
 ```
-# Привязать группу:
+# Bind a group:
 ndmc -c "dns-proxy route object-group <group_name> Bridge2 auto reject"
 
-# Снять:
+# Unbind:
 ndmc -c "no dns-proxy route object-group <group_name> Bridge2"
 ```
 
-### Ручной refresh всего
+### Manual full-refresh
 
-```
-ssh -p 222 root@192.168.1.1 'service S05vpnclient patch-now'
+```sh
+ssh -p 222 root@<router-lan-ip> 'service S05vpnclient patch-now'
 ```
 
 ### Status check
 
-```
-ssh -p 222 root@192.168.1.1 'service S05vpnclient status'
+```sh
+ssh -p 222 root@<router-lan-ip> 'service S05vpnclient status'
 ```
 
-Покажет: vpn_redacted, br2, члены bridge, SNAT-правило, все br2-таблицы
-и PID watcher'а.
+Shows: TAP iface, br2 IP, bridge members, SNAT rule, all br2 routing
+tables, watcher PID.
 
 ---
 
-## Редактирование SoftEther client config
+## Editing the SoftEther client config
 
-Если надо сменить сервер / пароль / HUB / создать дополнительный
-аккаунт:
+To change server / password / HUB / add an account:
 
-```bash
-ssh -p 222 root@192.168.1.1
+```sh
+ssh -p 222 root@<router-lan-ip>
 vpncmd /CLIENT localhost
-# интерактивный shell vpncmd:
-VPN Client> AccountList                              # все настройки
-VPN Client> AccountGet dallas                        # детали одного
-VPN Client> AccountServerCertSet dallas /LOADCERT:...# pin сертификата
-VPN Client> AccountDisconnect dallas; AccountConnect dallas   # цикл
-VPN Client> AccountDelete dallas; NicDelete dallas   # снести всё
+# vpncmd interactive shell:
+VPN Client> AccountList                              # all accounts
+VPN Client> AccountGet <profile>                     # one account's detail
+VPN Client> AccountServerCertSet <profile> /LOADCERT:...   # pin a cert
+VPN Client> AccountDisconnect <profile>; AccountConnect <profile>   # reconnect
 
-# Server change (при том же НИКе):
-VPN Client> AccountSet dallas /SERVER:newhost:443 /HUB:NEW
+# Change server (same NicName):
+VPN Client> AccountSet <profile> /SERVER:newhost:443 /HUB:NEW
 
-# Username change (после этого PasswordSet надо перевыставить):
-VPN Client> AccountUsernameSet dallas /USERNAME:newuser
-VPN Client> AccountPasswordSet dallas /PASSWORD:... /TYPE:standard
+# Change username (re-set password afterwards):
+VPN Client> AccountUsernameSet <profile> /USERNAME:newuser
+VPN Client> AccountPasswordSet <profile> /PASSWORD:... /TYPE:standard
 
 VPN Client> exit
 ```
 
-После любых изменений — `AccountDisconnect / AccountConnect dallas`
-или `service S05vpnclient restart` чтобы туннель пересобрался.
+After any change — `AccountDisconnect <profile> / AccountConnect
+<profile>` or `service S05vpnclient restart`.
 
 ---
 
-## Часто встречающиеся проблемы
+## Common issues
 
-| Симптом | Причина | Что делать |
+| Symptom | Cause | Fix |
 |---|---|---|
-| `tracert httpbin.org` хоп 2 = `192.168.99.1: host unreachable` | watcher не успел положить gateway в новую table; либо `default dev br2` без `via` | `service S05vpnclient patch-now` |
-| `no response after: include X.Y.Z` в kn_gui | NDM busy под нагрузкой watcher | v3.5.1+ retry; или временно `service S05vpnclient stop`, apply, `start` |
-| Bridge2 не виден в Web-UI Keenetic | NDM детектирует subnet conflict с SSTP0 (оба в 192.168.30.0/24) — Web-UI прячет конфликтующие | косметика, не функциональная — kn_gui всё равно видит, dns-proxy работает |
-| После reboot tracert идёт через WAN | watcher не запустился (проверь `service S05vpnclient status`); или `opkg disk storage:/` пропал из startup-config | `system configuration save` после `opkg disk storage:/`, проверь `show running-config \| grep opkg` |
-| `Connection refused` на 222 | dropbear не стартовал → Entware не загружается | `show running-config \| grep "opkg disk\|opkg initrc"` — должны быть оба; если нет — переустановить шаг 1 |
-| SoftEther session retrying бесконечно | Auth fail — wrong username/password/HUB | сверь с админом сервера; для SoftEther у пользователя могут быть отдельные креды для нативного протокола (отличающиеся от SSTP) |
-| NAND места мало (`No space left`) | На /opt накопились логи/кэш | `du -sh /opt/* 2>/dev/null \| sort -h \| tail` чтобы найти; чистить через `rm` или `opkg clean` |
+| `traceroute` hop 2 returns `host unreachable` | watcher hasn't yet placed the gateway in a new table; or `default dev br2` without `via` | `service S05vpnclient patch-now` |
+| `no response after: include X.Y.Z` in kn_gui | NDM busy under watcher load | kn_gui v3.5.1+ retries; or stop watcher temporarily, apply, then start |
+| Bridge2 not visible in NDM web UI | NDM detects subnet conflict with another tunnel — UI hides conflicts | cosmetic, not functional — kn_gui still sees it, dns-proxy still works |
+| After reboot traceroute goes via WAN | watcher didn't start (`service S05vpnclient status`) — or `opkg disk storage:/` dropped from startup-config | `system configuration save` after `opkg disk storage:/`, verify with `show running-config \| grep opkg` |
+| `Connection refused` on tcp/222 | dropbear didn't start → Entware didn't load | check `show running-config \| grep "opkg disk\|opkg initrc"` — both should be present; reinstall step 1 if not |
+| SoftEther session retries forever | auth fail — wrong username/password/HUB | check with the server admin; some SoftEther deployments give separate creds for the native protocol vs SSTP |
+| `No space left` on /opt | logs/cache piled up | `du -sh /opt/* 2>/dev/null \| sort -h \| tail` to find culprits; clean via `rm` or `opkg clean` |
 
 ---
 
-## Откат всего
+## Full uninstall
 
-Если всё надо снести и начать заново:
-
-```bash
-# через telnet:
+```sh
+# Via telnet:
 ndmc -c "no interface Bridge2"
 ndmc -c "no opkg disk"
 ndmc -c "no opkg dns-override"
@@ -283,13 +313,13 @@ system configuration save
 system reboot
 ```
 
-После ребута роутер вернётся в чистое состояние, NAND-раздел очищен.
+After reboot the router is back to clean state, NAND wiped.
 
 ---
 
-## Дополнительные ссылки
+## References
 
-- Watcher логика и почему так — `S05vpnclient` (комментарии в файле)
+- Watcher logic and rationale — comments in `S05vpnclient`
 - kn_gui upstream — https://github.com/inlarin/keenetic-fqdn-manager
-- SoftEther Developer Edition — https://github.com/SoftEtherVPN/SoftEtherVPN
+- SoftEther — https://github.com/SoftEtherVPN/SoftEtherVPN
 - Keenetic CLI manual — https://help.keenetic.com/hc/en-us/articles/213965889
