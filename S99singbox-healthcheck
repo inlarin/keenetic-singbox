@@ -1,0 +1,340 @@
+#!/bin/sh
+# Honest health-check daemon for sing-box single-pool architecture.
+#
+# What it does
+# ------------
+#   Every $LIVENESS_INTERVAL seconds:
+#     curl --interface opkgtun0 --max-time 8 $LIVENESS_URL
+#   If $FAIL_THRESHOLD failures in a row:
+#     PUT /proxies/select  {"name": <next-best-by-ranking>}
+#   so the user keeps connectivity even when sing-box's urltest is
+#   confused by REALITY/Vision servers that pass HEAD /generate_204
+#   but fail real-traffic TLS.
+#
+#   Every $RANK_INTERVAL seconds:
+#     For each outbound in select.outbounds (skipping urltest-*/select-*/
+#     direct meta-tags):
+#         tmp-pin via PUT /proxies/select {"name": <tag>}
+#         curl probe through opkgtun0 → record latency_ms or "fail"
+#     Sort, write /opt/var/lib/sing-box/server-ranking.json. Then
+#     restore the previously-active pick.
+#
+#   Sing-box's built-in urltest probes HEAD /generate_204 over the
+#   outbound — but the request only crosses gstatic's generic TLS,
+#   NOT the country server's REALITY/Vision/etc. We've seen servers
+#   pass urltest while real streams die. Probing through the kernel
+#   `opkgtun0` interface forces the whole pipeline end-to-end (mangle
+#   MARK + tun read + outbound + server REALITY), so the verdict
+#   matches what users actually experience.
+#
+# Manual:
+#   /opt/etc/init.d/S99singbox-healthcheck {start|stop|restart|status|sweep|once}
+#   - sweep: full ranking sweep right now (~5 min for 42 servers)
+#   - once : one liveness probe pass and exit
+
+ENABLED=yes
+PATH=/opt/sbin:/opt/bin:/opt/usr/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# All runtime state on tmpfs to spare UBIFS NAND wear. Lost on reboot —
+# daemon rebuilds ranking on first sweep (~5 min), select.now restored
+# from sing-box's cache.db (also tmpfs but loaded from running config).
+LOG=/tmp/singbox-healthcheck.log
+PID=/tmp/singbox-healthcheck.pid
+RANK=/tmp/singbox-server-ranking.json
+STATE_DIR=/tmp/singbox-state
+CONFIG=/opt/etc/sing-box/config.json
+CLASH_API=http://192.168.1.1:9090
+
+# Single TUN inbound, single top-level selector. Both names are baked into
+# the converter (sub_to_singbox.py) and the SELECT_TAG must match what the
+# converter emits.
+TUN_IFACE=opkgtun0
+SELECT_TAG=select
+
+LIVENESS_URL='https://www.gstatic.com/generate_204'
+LIVENESS_INTERVAL=30                 # was 60 — faster failover
+RANK_INTERVAL=600                    # 10 min full sweep cadence (unchanged)
+FAIL_THRESHOLD=1                     # was 2 — single fail rotates immediately
+PROBE_TIMEOUT=8
+ROTATIONS_BEFORE_FORCE_SWEEP=3       # if rotating this many times without
+                                     # finding a live outbound, trust the
+                                     # ranking is stale and force a fresh
+                                     # sweep instead of round-robining
+                                     # 42 servers at 30s each (~21 min
+                                     # worst-case → ~7 min with sweep)
+
+mkdir -p "$STATE_DIR"
+
+ts() { date '+%Y-%m-%d %H:%M:%S'; }
+log() { echo "[$(ts)] $*" >> "$LOG"; }
+
+get_secret() {
+    grep -E '"secret"' "$CONFIG" | head -1 | sed 's/.*"secret": *"//; s/".*//'
+}
+
+# List all real outbound tags exposed via the top-level selector. Skips
+# urltest-* / select-* meta-tags and `direct`.
+list_pool() {
+    secret="$1"
+    curl -fsS --max-time 5 -H "Authorization: Bearer $secret" \
+        "$CLASH_API/proxies/$SELECT_TAG" 2>/dev/null \
+      | python3 -c '
+import json, sys
+try: d = json.load(sys.stdin)
+except Exception: sys.exit(0)
+for t in d.get("all", []):
+    if t.startswith(("urltest-", "select-")) or t == "direct":
+        continue
+    print(t)
+'
+}
+
+now_pick() {
+    secret="$1"
+    curl -fsS --max-time 5 -H "Authorization: Bearer $secret" \
+        "$CLASH_API/proxies/$SELECT_TAG" 2>/dev/null \
+      | python3 -c 'import json,sys; print(json.load(sys.stdin).get("now",""))'
+}
+
+set_pick() {
+    tag="$1"; secret="$2"
+    curl -fsS --max-time 5 -X PUT \
+        -H "Authorization: Bearer $secret" \
+        -H 'Content-Type: application/json' \
+        -d "{\"name\":\"$tag\"}" \
+        "$CLASH_API/proxies/$SELECT_TAG" >/dev/null 2>&1
+}
+
+# Probe through opkgtun0; print latency_ms on success, nothing on failure.
+probe() {
+    curl -fsS --interface "$TUN_IFACE" --max-time "$PROBE_TIMEOUT" \
+         -o /dev/null -w '%{time_total}\n' "$LIVENESS_URL" 2>/dev/null \
+      | awk '{ printf "%d\n", $1 * 1000 }'
+}
+
+# Pick the next live outbound out of ranking, skipping the current dead one.
+next_alive() {
+    secret="$1"; current="$2"
+    if [ -f "$RANK" ]; then
+        ranked=$(python3 - "$RANK" <<'PY'
+import json, sys
+try: d = json.load(open(sys.argv[1]))
+except Exception: d = {}
+ranked = sorted(
+    ((tag, info.get("latency_ms")) for tag, info in d.items()
+     if info.get("latency_ms") and info["latency_ms"] > 0),
+    key=lambda x: x[1])
+for tag, _ in ranked:
+    print(tag)
+PY
+)
+        for t in $ranked; do
+            [ "$t" != "$current" ] && [ -n "$t" ] && echo "$t" && return 0
+        done
+    fi
+    # Ranking empty / all dead — round-robin in pool order.
+    for t in $(list_pool "$secret"); do
+        [ "$t" != "$current" ] && echo "$t" && return 0
+    done
+}
+
+# ── Liveness pass ──────────────────────────────────────────────────────────
+#
+# State files (tmpfs):
+#   /tmp/singbox-state/fail          consecutive probe failures
+#   /tmp/singbox-state/rotations     consecutive rotations without success
+#                                    (reset on any successful probe; if it
+#                                    crosses ROTATIONS_BEFORE_FORCE_SWEEP
+#                                    we force a fresh sweep — protects
+#                                    against running through 42 dead
+#                                    servers in stale ranking order)
+
+liveness_pass() {
+    secret=$(get_secret)
+    [ -z "$secret" ] && { log "no clash secret found"; return 1; }
+    fail_state="$STATE_DIR/fail"
+    rot_state="$STATE_DIR/rotations"
+
+    ms=$(probe)
+    if [ -n "$ms" ]; then
+        echo 0 > "$fail_state"
+        echo 0 > "$rot_state"
+        return 0
+    fi
+
+    fc=$(cat "$fail_state" 2>/dev/null || echo 0)
+    fc=$((fc + 1))
+    echo "$fc" > "$fail_state"
+    log "liveness probe failed ($fc/$FAIL_THRESHOLD)"
+    [ "$fc" -lt "$FAIL_THRESHOLD" ] && return 0
+
+    cur=$(now_pick "$secret")
+    new=$(next_alive "$secret" "$cur")
+    if [ -n "$new" ] && [ "$new" != "$cur" ]; then
+        log "rotating $SELECT_TAG.now: $cur -> $new"
+        set_pick "$new" "$secret"
+        echo 0 > "$fail_state"
+        rot=$(cat "$rot_state" 2>/dev/null || echo 0)
+        rot=$((rot + 1))
+        echo "$rot" > "$rot_state"
+        if [ "$rot" -ge "$ROTATIONS_BEFORE_FORCE_SWEEP" ]; then
+            log "$rot rotations without success → forcing ranking sweep"
+            ranking_sweep
+            pin_best_ranked
+            echo 0 > "$rot_state"
+        fi
+    else
+        log "no alternative outbound, sticking with $cur"
+    fi
+}
+
+# ── Full ranking sweep ─────────────────────────────────────────────────────
+ranking_sweep() {
+    secret=$(get_secret)
+    [ -z "$secret" ] && { log "no clash secret found"; return 1; }
+    log "=== ranking sweep start ==="
+
+    pool=$(list_pool "$secret")
+    [ -z "$pool" ] && { log "empty pool, abort"; return 0; }
+
+    saved_pick=$(now_pick "$secret")
+    sweep_lines="$STATE_DIR/_sweep.txt"
+    : > "$sweep_lines"
+
+    for tag in $pool; do
+        set_pick "$tag" "$secret"
+        sleep 1
+        ms=$(probe)
+        printf '%s|%s\n' "$tag" "${ms:-}" >> "$sweep_lines"
+        log "sweep: $tag -> ${ms:-fail}ms"
+    done
+
+    [ -n "$saved_pick" ] && set_pick "$saved_pick" "$secret"
+
+    python3 - "$RANK" "$sweep_lines" <<'PY'
+import json, sys, time
+try: rank = json.load(open(sys.argv[1]))
+except Exception: rank = {}
+for ln in open(sys.argv[2]):
+    ln = ln.rstrip("\n")
+    if not ln: continue
+    parts = ln.split("|", 1)
+    if len(parts) != 2: continue
+    tag, ms = parts
+    rank[tag] = {"latency_ms": int(ms) if ms.strip() else None,
+                 "ts": time.time()}
+open(sys.argv[1], "w").write(json.dumps(rank, indent=2, sort_keys=True))
+PY
+    rm -f "$sweep_lines"
+    log "=== ranking sweep done ==="
+}
+
+# Pin select.now to the fastest ranked outbound — used after every sweep
+# so the user's auto-pick is always anchored to a verified-live server,
+# not sing-box's lying urltest-all. Skips if ranking has no live entries
+# (don't clobber a manually pinned good outbound with garbage).
+pin_best_ranked() {
+    secret=$(get_secret)
+    [ -z "$secret" ] && return 1
+    [ -f "$RANK" ] || return 0
+    best=$(python3 - "$RANK" <<'PY'
+import json, sys
+try: d = json.load(open(sys.argv[1]))
+except Exception: sys.exit(0)
+ranked = sorted(((t, i.get("latency_ms")) for t, i in d.items()
+                 if i.get("latency_ms") and i["latency_ms"] > 0),
+                key=lambda x: x[1])
+if ranked: print(ranked[0][0])
+PY
+)
+    [ -z "$best" ] && return 0
+    cur=$(now_pick "$secret")
+    if [ "$cur" != "$best" ]; then
+        log "auto-pin select.now: $cur -> $best (best in ranking)"
+        set_pick "$best" "$secret"
+    fi
+}
+
+# ── Daemon loop ────────────────────────────────────────────────────────────
+daemon_loop() {
+    trap 'rm -f "$PID"; exit 0' TERM INT
+    rank_ticks=$((RANK_INTERVAL / LIVENESS_INTERVAL))
+    [ "$rank_ticks" -lt 1 ] && rank_ticks=1
+    log "daemon started, liveness=${LIVENESS_INTERVAL}s, sweep every ${rank_ticks} ticks"
+
+    ranking_sweep
+    pin_best_ranked
+    tick=0
+    while true; do
+        liveness_pass
+        tick=$((tick + 1))
+        if [ "$tick" -ge "$rank_ticks" ]; then
+            ranking_sweep
+            pin_best_ranked
+            tick=0
+        fi
+        sleep "$LIVENESS_INTERVAL"
+    done
+}
+
+is_running() {
+    [ -f "$PID" ] && kill -0 "$(cat "$PID" 2>/dev/null)" 2>/dev/null
+}
+
+start() {
+    [ "$ENABLED" != "yes" ] && return 0
+    if is_running; then echo "already running PID=$(cat $PID)"; return 0; fi
+    log "=== start ==="
+    ( daemon_loop ) </dev/null >/dev/null 2>&1 &
+    echo $! > "$PID"
+    sleep 1
+    is_running && echo "started PID=$(cat $PID)" || echo "FAILED"
+}
+
+stop() {
+    if is_running; then
+        kill "$(cat $PID)" 2>/dev/null
+        sleep 1
+        kill -9 "$(cat $PID)" 2>/dev/null
+        rm -f "$PID"
+        log stopped
+        echo stopped
+    else
+        echo "not running"
+    fi
+}
+
+case "${1:-}" in
+    start) start ;;
+    stop)  stop ;;
+    restart) stop; sleep 1; start ;;
+    status)
+        is_running && echo "running PID=$(cat $PID)" || echo "not running"
+        echo
+        echo "=== last 20 log lines ==="
+        tail -20 "$LOG" 2>/dev/null
+        echo
+        echo "=== current ranking (top 10) ==="
+        if [ -f "$RANK" ]; then
+            python3 - "$RANK" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1]))
+ranked = sorted((t for t in r.items() if t[1].get("latency_ms")),
+                key=lambda x: x[1]["latency_ms"])[:10]
+if not ranked:
+    print("  (no live outbounds)")
+else:
+    for tag, info in ranked:
+        print(f"    {info['latency_ms']:5}ms  {tag}")
+PY
+        else
+            echo "  (no ranking yet)"
+        fi
+        ;;
+    sweep) ranking_sweep ;;
+    once)  liveness_pass ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status|sweep|once}"
+        exit 1
+        ;;
+esac

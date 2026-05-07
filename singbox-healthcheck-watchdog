@@ -1,0 +1,18 @@
+#!/bin/sh
+# Watchdog: ensure S99singbox-healthcheck daemon is running. Runs every
+# minute via /opt/etc/cron.1min/. Cheap idempotent check — start does
+# nothing if already alive.
+
+PID=/tmp/singbox-healthcheck.pid           # matches healthcheck daemon's tmpfs path
+INIT=/opt/etc/init.d/S99singbox-healthcheck
+
+is_running() {
+    [ -f "$PID" ] && kill -0 "$(cat "$PID" 2>/dev/null)" 2>/dev/null
+}
+
+if is_running; then
+    exit 0
+fi
+
+logger -t singbox-hc-watchdog "daemon dead, restarting"
+"$INIT" start >/dev/null 2>&1

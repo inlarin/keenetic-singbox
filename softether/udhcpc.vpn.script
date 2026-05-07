@@ -1,0 +1,38 @@
+#!/bin/sh
+# udhcpc lease handler for vpn_redacted. Called by busybox udhcpc with $1 set
+# to one of: deconfig | bound | renew | leasefail | nak.
+#
+# Variables exported by udhcpc on bound/renew:
+#   $interface  - iface name (here always vpn_redacted)
+#   $ip         - leased address
+#   $subnet     - dotted netmask (e.g. 255.255.255.0)
+#   $router     - HUB gateway (e.g. 10.X.0.1)
+#   $dns        - server-supplied DNS list (we ignore — we don't want to
+#                 hijack system DNS)
+#
+# We deliberately do NOT add a default route; selective routing through this
+# tunnel is configured externally with explicit `ip route add ... dev
+# vpn_redacted via $router` rules so that only the chosen traffic uses the VPN.
+
+LOG_TAG=udhcpc-vpn_redacted
+
+case "$1" in
+    deconfig)
+        logger -t "$LOG_TAG" "$interface: deconfig"
+        ip -4 addr flush dev "$interface" 2>/dev/null
+        ip link set dev "$interface" up 2>/dev/null
+        ;;
+    bound|renew)
+        logger -t "$LOG_TAG" "$interface: $1 ip=$ip mask=$subnet router=$router"
+        ip -4 addr flush dev "$interface" 2>/dev/null
+        # ifconfig accepts dotted netmask; ip-addr-add wants CIDR. Use
+        # ifconfig to skip the netmask→prefix conversion table.
+        ifconfig "$interface" "$ip" netmask "$subnet" up
+        # Keep the HUB-subnet link route auto-installed by ifconfig; that
+        # gives `ping $router` and selective `via $router` routing.
+        ;;
+    leasefail|nak)
+        logger -t "$LOG_TAG" "$interface: $1 (will retry)"
+        ;;
+esac
+exit 0

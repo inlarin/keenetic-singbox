@@ -1,0 +1,14 @@
+# Force LF for files that run on the router (Linux side)
+*.sh                    text eol=lf
+*.script                text eol=lf
+S99*                    text eol=lf
+S05*                    text eol=lf
+singbox-healthcheck-*   text eol=lf
+sub-refresh             text eol=lf
+ndm_setup.cmd           text eol=lf
+
+# Python and configs — let git auto-detect, but normalize on commit
+*.py                    text eol=lf
+*.md                    text eol=lf
+*.json                  text eol=lf
+*.txt                   text eol=lf

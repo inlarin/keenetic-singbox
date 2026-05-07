@@ -1,0 +1,8 @@
+# Runtime dependencies for the internal monitoring + Keenetic tooling.
+# The kn_gui/ subproject has its own (empty) runtime deps — it uses only
+# the Python stdlib. See kn_gui/requirements-dev.txt for test deps.
+
+# HTTP client used by pppoe_monitor_v3.py's RCIClient.
+# Pinning to a minor series: we use only .get / .post / .Session — the
+# public API is stable, but a major bump can change TLS defaults.
+requests>=2.32.0,<3.0.0

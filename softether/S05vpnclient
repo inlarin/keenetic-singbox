@@ -1,0 +1,272 @@
+#!/bin/sh
+# Entware init for SoftEther vpnclient + NDM Bridge2 integration.
+#
+# Boot lifecycle (assumes NDM startup-config holds:
+#   - `interface Bridge2 ... up` (Bridge2 noun + Linux br2)
+#   - `dns-proxy route object-group <X> Bridge2 auto reject` rules):
+#
+#   1. vpnclient daemon starts → softether tunnel up → `vpn_redacted` TAP appears
+#   2. NDM brings up `Bridge2` (Linux br2) per startup-config
+#   3. The watcher loop keeps the integration glued together:
+#        a. `brctl addif br2 vpn_redacted` — bridge softether tunnel into NDM Bridge2 (Linux level).
+#        b. `udhcpc -i br2` — fetch IP from softether HUB. NDM doesn't run DHCP on Bridge2
+#           (no NDM-known active member), so we do it ourselves.
+#        c. POSTROUTING SNAT to br2's IP — HUB only knows DHCP-assigned IP, not Bridge2 stub.
+#        d. Patch NDM-created routing tables: NDM writes `default dev br2` without a `via` gateway
+#           for every dns-proxy route group bound to Bridge2. Linux can't ARP a public IP through
+#           an L2 bridge, so we replace each table's default with `via $HUB_GW dev br2`.
+#
+# Manual trigger: /opt/etc/init.d/S05vpnclient patch-now (re-run all glue steps once).
+# Status:        /opt/etc/init.d/S05vpnclient status
+
+PATH=/opt/sbin:/opt/bin:/opt/usr/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export GCONV_PATH=/opt/lib/gconv
+
+VPNCLIENT=/opt/libexec/softethervpn/vpnclient
+VPN_IFACE=vpn_redacted
+NDM_BRIDGE=br2          # kernel/Linux bridge name
+NDM_BRIDGE_NAME=Bridge2 # NDM CLI noun (running-config uses this)
+HUB_GW=10.X.0.1
+DHCP_SCRIPT=/opt/etc/udhcpc.${NDM_BRIDGE}.script
+WATCHER_PID=/opt/var/run/${VPN_IFACE}_watcher.pid
+
+# Two cadences:
+#   WATCHER_INTERVAL — lightweight glue (bridge member, DHCP, SNAT) every 10 s.
+#   PATCH_INTERVAL_TICKS — heavy patch_routing_tables (which calls
+#     `ndmc show running-config` and parses 33+ groups) every 6 ticks = 60 s.
+#   The heavy step is what was contending with kn_gui apply: NDM briefly locks
+#     config while serving the show, and concurrent writes from the GUI hit
+#     timeouts. Spacing it out makes the contention window negligible.
+#   Use `patch-now` action right after a kn_gui apply if you don't want to
+#     wait up to 60 s for the watcher to catch up.
+WATCHER_INTERVAL=10
+PATCH_INTERVAL_TICKS=6
+
+LOG_TAG=vpnclient
+
+iface_exists()  { ip link show "$1" >/dev/null 2>&1; }
+iface_carrier() { ip link show "$1" 2>/dev/null | grep -q "LOWER_UP"; }
+iface_master()  { ip -o link show "$1" 2>/dev/null | grep -oE 'master [a-z_0-9]+' | awk '{print $2}'; }
+
+ensure_bridge_member() {
+    iface_exists "$VPN_IFACE" && iface_exists "$NDM_BRIDGE" || return 0
+    [ "$(iface_master "$VPN_IFACE")" = "$NDM_BRIDGE" ] && return 0
+    logger -t "$LOG_TAG" "bridging $VPN_IFACE into $NDM_BRIDGE"
+    brctl addif "$NDM_BRIDGE" "$VPN_IFACE" 2>&1 | logger -t "$LOG_TAG"
+}
+
+ensure_dhcp_on_bridge() {
+    iface_exists "$NDM_BRIDGE" || return 0
+    iface_carrier "$NDM_BRIDGE" || return 0
+    ip -4 addr show "$NDM_BRIDGE" 2>/dev/null | grep -q "inet " && return 0
+    logger -t "$LOG_TAG" "$NDM_BRIDGE has no IPv4, requesting DHCP"
+    udhcpc -i "$NDM_BRIDGE" -t 3 -T 3 -n -q -s "$DHCP_SCRIPT" 2>&1 | logger -t "udhcpc-${NDM_BRIDGE}"
+}
+
+ensure_snat() {
+    local br_ip
+    br_ip=$(ip -4 -o addr show "$NDM_BRIDGE" 2>/dev/null | awk '{print $4}' | cut -d/ -f1)
+    [ -n "$br_ip" ] || return 0
+    if iptables -t nat -C POSTROUTING -o "$NDM_BRIDGE" -j SNAT --to-source "$br_ip" 2>/dev/null; then
+        return 0
+    fi
+    # Wipe any stale SNAT for our bridge before installing fresh — the source IP
+    # might have changed across DHCP renewals.
+    iptables -t nat -S POSTROUTING 2>/dev/null \
+        | grep -- "-o $NDM_BRIDGE -j SNAT" \
+        | sed 's/^-A /-D /' \
+        | while read -r del; do iptables -t nat $del 2>/dev/null; done
+    logger -t "$LOG_TAG" "installing SNAT POSTROUTING -o $NDM_BRIDGE --to-source $br_ip"
+    iptables -t nat -A POSTROUTING -o "$NDM_BRIDGE" -j SNAT --to-source "$br_ip" \
+        2>&1 | logger -t "$LOG_TAG"
+}
+
+patch_routing_tables() {
+    # NDM creates a per-group fwmark+routing-table whenever a dns-proxy route
+    # binds an object-group to an interface. For PPP-style targets it also
+    # writes `default dev <iface>` into that table; for Bridge2 it sometimes
+    # leaves the table empty (race / `defaultgw: no` heuristic). Either way
+    # we need a `default via $HUB_GW dev br2` in that table.
+    #
+    # Reliable algorithm:
+    #   1. From `show running-config`, list every object-group bound to
+    #      $NDM_BRIDGE_NAME → ensure `default via $HUB_GW dev $NDM_BRIDGE`
+    #      is the active default in that group's fwmark table.
+    #   2. List every object-group NOT bound to $NDM_BRIDGE_NAME → if its
+    #      table has a stale `default via $HUB_GW dev $NDM_BRIDGE` entry
+    #      (left over from a previous Bridge2 binding), remove it. Without
+    #      this the rebound group sees TWO defaults — the stale br2 wins
+    #      because it has no metric, silently leaking traffic into the old
+    #      tunnel even though the user re-bound the group to OpkgTunN/etc.
+    # Idempotent: replace/delete silently noop when route already correct;
+    # only log on mutation so we don't spam syslog every 10s.
+
+    local groups_ours groups_others g mark tbl current
+    groups_ours=$(ndmc -c "show running-config" 2>/dev/null \
+             | awk -v iface="$NDM_BRIDGE_NAME" '
+                  $1 == "route" && $2 == "object-group" && $4 == iface { print $3 }
+               ')
+    groups_others=$(ndmc -c "show running-config" 2>/dev/null \
+             | awk -v iface="$NDM_BRIDGE_NAME" '
+                  $1 == "route" && $2 == "object-group" && $4 != iface { print $3 }
+               ')
+
+    # Step 1 — install our default in every Bridge2-bound group's table.
+    for g in $groups_ours; do
+        mark=$(iptables -t mangle -nvL _NDM_DNSRT_PREROUTING_MANGLE 2>/dev/null \
+               | awk -v needle="_NDM_OGDN_4_@${g}" '
+                   index($0, needle) > 0 && index($0, "MARK set") > 0 {
+                       for (i=1; i<=NF; i++) if ($i == "set") { print $(i+1); exit }
+                   }')
+        [ -z "$mark" ] && continue
+
+        tbl=$(ip rule list 2>/dev/null \
+              | awk -v m="$mark" '
+                  index($0, "fwmark "m) > 0 && index($0, "lookup ") > 0 && index($0, "blackhole") == 0 {
+                      for (i=1; i<=NF; i++) if ($i == "lookup") { print $(i+1); exit }
+                  }' \
+              | head -1)
+        case "$tbl" in
+            ''|*[!0-9]*) continue ;;
+        esac
+
+        current=$(ip route show table "$tbl" 2>/dev/null \
+                  | awk '$1=="default" {print; exit}')
+        case "$current" in
+            "default via $HUB_GW dev $NDM_BRIDGE"*) continue ;;
+        esac
+
+        logger -t "$LOG_TAG" "patching table ${tbl} (group ${g}, mark ${mark}) → default via ${HUB_GW} dev ${NDM_BRIDGE}"
+        ip route replace default via "$HUB_GW" dev "$NDM_BRIDGE" table "$tbl" \
+            2>&1 | logger -t "$LOG_TAG"
+    done
+
+    # Step 2 — strip our br2-default from any group bound elsewhere now.
+    # NDM does NOT clean up stale routing-table entries when a dns-proxy
+    # binding is moved from Bridge2 to OpkgTunN; the old `default via br2`
+    # we installed here keeps living in the table and (because it has no
+    # metric while the OpkgTunN one has metric 1000) wins the kernel's
+    # longest-prefix match, silently leaking traffic. Remove it.
+    for g in $groups_others; do
+        mark=$(iptables -t mangle -nvL _NDM_DNSRT_PREROUTING_MANGLE 2>/dev/null \
+               | awk -v needle="_NDM_OGDN_4_@${g}" '
+                   index($0, needle) > 0 && index($0, "MARK set") > 0 {
+                       for (i=1; i<=NF; i++) if ($i == "set") { print $(i+1); exit }
+                   }')
+        [ -z "$mark" ] && continue
+
+        tbl=$(ip rule list 2>/dev/null \
+              | awk -v m="$mark" '
+                  index($0, "fwmark "m) > 0 && index($0, "lookup ") > 0 && index($0, "blackhole") == 0 {
+                      for (i=1; i<=NF; i++) if ($i == "lookup") { print $(i+1); exit }
+                  }' \
+              | head -1)
+        case "$tbl" in
+            ''|*[!0-9]*) continue ;;
+        esac
+
+        # Only delete a default-via-br2 line; leave anything else (typically
+        # the legitimate `default via 172.19.X.1 dev opkgtunN metric 1000`
+        # NDM populated for the new binding).
+        if ip route show table "$tbl" 2>/dev/null | grep -q "default via $HUB_GW dev $NDM_BRIDGE"; then
+            logger -t "$LOG_TAG" "cleaning stale br2 default from table ${tbl} (group ${g}, now bound elsewhere)"
+            ip route del default via "$HUB_GW" dev "$NDM_BRIDGE" table "$tbl" \
+                2>&1 | logger -t "$LOG_TAG"
+        fi
+    done
+}
+
+run_glue_once() {
+    ensure_bridge_member
+    ensure_dhcp_on_bridge
+    ensure_snat
+    patch_routing_tables
+}
+
+watcher_running() {
+    [ -f "$WATCHER_PID" ] && [ -d "/proc/$(cat "$WATCHER_PID" 2>/dev/null)" ]
+}
+
+start_watcher() {
+    if watcher_running; then
+        logger -t "$LOG_TAG" "watcher already running PID=$(cat "$WATCHER_PID")"
+        return 0
+    fi
+    mkdir -p "$(dirname "$WATCHER_PID")"
+    # Detach stdin/stdout/stderr so the background loop doesn't keep the
+    # parent shell (and its SSH session) alive waiting for the pipes to
+    # close. Without this, every `S05vpnclient restart` over plink hangs
+    # until plink times out.
+    (
+        # Force patch_routing_tables on the very first iteration so a fresh
+        # boot does not have to wait $PATCH_INTERVAL_TICKS before NDM tables
+        # get their gateway. Subsequent runs are paced.
+        tick="$PATCH_INTERVAL_TICKS"
+        while true; do
+            ensure_bridge_member
+            ensure_dhcp_on_bridge
+            ensure_snat
+            if [ "$tick" -ge "$PATCH_INTERVAL_TICKS" ]; then
+                patch_routing_tables
+                tick=0
+            fi
+            tick=$((tick + 1))
+            sleep "$WATCHER_INTERVAL"
+        done
+    ) </dev/null >/dev/null 2>&1 &
+    echo $! > "$WATCHER_PID"
+    logger -t "$LOG_TAG" "watcher started PID=$(cat "$WATCHER_PID")"
+}
+
+stop_watcher() {
+    if [ -f "$WATCHER_PID" ]; then
+        kill "$(cat "$WATCHER_PID")" 2>/dev/null
+        rm -f "$WATCHER_PID"
+    fi
+}
+
+case "$1" in
+    start)
+        logger -t "$LOG_TAG" "starting softether vpnclient service"
+        LANG=en_US.UTF-8 "$VPNCLIENT" start
+        sleep 2
+        start_watcher
+        ;;
+    stop)
+        stop_watcher
+        logger -t "$LOG_TAG" "stopping softether vpnclient service"
+        LANG=en_US.UTF-8 "$VPNCLIENT" stop
+        ;;
+    restart)
+        stop_watcher
+        logger -t "$LOG_TAG" "stopping softether vpnclient service"
+        LANG=en_US.UTF-8 "$VPNCLIENT" stop
+        sleep 5
+        logger -t "$LOG_TAG" "starting softether vpnclient service"
+        LANG=en_US.UTF-8 "$VPNCLIENT" start
+        sleep 2
+        start_watcher
+        ;;
+    patch-now)
+        logger -t "$LOG_TAG" "manual patch-now trigger"
+        run_glue_once
+        ;;
+    status)
+        echo "=== $VPN_IFACE ==="
+        ip a show "$VPN_IFACE" 2>/dev/null | head -3
+        echo "=== $NDM_BRIDGE ==="
+        ip a show "$NDM_BRIDGE" 2>/dev/null | head -4
+        echo "=== bridge members ==="
+        brctl show "$NDM_BRIDGE" 2>/dev/null
+        echo "=== SNAT rules ==="
+        iptables -t nat -nvL POSTROUTING 2>/dev/null | grep -E "Chain|$NDM_BRIDGE" | head -5
+        echo "=== ${NDM_BRIDGE} routing tables (per dns-proxy group) ==="
+        ip route show table all 2>/dev/null | grep "dev $NDM_BRIDGE" | head -10
+        echo "=== watcher ==="
+        if watcher_running; then echo "running PID $(cat "$WATCHER_PID")"; else echo "NOT running"; fi
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|patch-now|status}"
+        exit 1
+        ;;
+esac
