@@ -9,16 +9,26 @@ any Keenetic with the OPKG component and Entware deployed.
 
 ## Quick start
 
-SSH into the router and run the installer. It's interactive — it'll
-prompt for your subscription URL, auto-detect the LAN IP, and deploy
-everything.
+You only need an SSH client on your workstation — **the installer
+runs on the router**, not on your laptop. Windows 10/11 ships with
+OpenSSH built in (`ssh` works in PowerShell / cmd / Windows Terminal /
+git-bash). macOS and Linux already have it. PuTTY also works.
+
+From your workstation:
 
 ```sh
 ssh -p 222 root@<router-ip>
+```
+
+You're now in the router's shell. Run:
+
+```sh
 curl -fsSL https://raw.githubusercontent.com/inlarin/keenetic-singbox/main/install.sh | sh
 ```
 
-That's it. ~3 minutes later you'll get a MetaCubeXD URL and the API
+The installer is interactive — it prompts for your subscription URL,
+auto-detects the LAN IP, generates a Clash API secret, and deploys
+everything. ~3 minutes later you'll get a MetaCubeXD URL and the API
 secret to paste into it.
 
 For the full step-by-step (with verification, FQDN pinning, removal,

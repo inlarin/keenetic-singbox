@@ -4,7 +4,36 @@ Step-by-step deployment of `keenetic-singbox` on a Keenetic-class router.
 
 The router runs the entire stack — sing-box itself, the healthcheck
 daemon, and the daily subscription refresh job. You don't need anything
-on the workstation beyond an SSH terminal.
+on the workstation beyond an SSH client.
+
+## Where commands run
+
+This guide has two kinds of code blocks:
+
+- **From your workstation** — the line starting with `ssh ...`. This
+  is the only command you run from your PC. It opens a remote shell on
+  the router.
+- **On the router** — every other command. They execute over the SSH
+  session you just opened. Once you see the router's prompt
+  (`Hopper4G+ #` or similar), you're in the router shell.
+
+You'll see the same pattern throughout the guide.
+
+### SSH client
+
+Any SSH client works:
+
+| OS | Recommended |
+|---|---|
+| Windows 10 / 11 | Built-in OpenSSH — `ssh` in PowerShell, cmd, Windows Terminal, or git-bash. |
+| macOS | Built-in `ssh` in Terminal / iTerm. |
+| Linux | Built-in `ssh`. |
+| Anywhere | PuTTY (set port to 222, host = router IP, login = `root`). |
+
+The installer prompts for input via `/dev/tty`, which means the SSH
+terminal handles the prompts directly. ANSI colour works in modern
+Windows terminals (Windows Terminal, PowerShell ISE, git-bash); the
+script detects a non-tty environment and falls back to plain output.
 
 ## What you need
 
@@ -38,10 +67,15 @@ over the NDM telnet CLI.)
 
 ## Step 2 — Run the installer
 
-SSH into the router and pipe `install.sh` into `sh`:
+**From your workstation:**
 
 ```sh
 ssh -p 222 root@<router-ip>
+```
+
+**On the router** (you'll see the `Hopper4G+ #` prompt):
+
+```sh
 curl -fsSL https://raw.githubusercontent.com/inlarin/keenetic-singbox/main/install.sh | sh
 ```
 
