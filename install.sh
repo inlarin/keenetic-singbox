@@ -16,6 +16,8 @@ SING_DIR=/opt/etc/sing-box
 SHARE_DIR=/opt/share/sing-box
 SECRET_FILE="$SING_DIR/.healthcheck-secret"
 URL_FILE="$SING_DIR/.subscription-url"
+HY2_FILE="$SING_DIR/.hy2-uri"
+ENV_FILE="$SING_DIR/.env"
 NDM_TMP=/tmp/ndm_setup.cmd
 
 # ── output helpers ──────────────────────────────────────────────────────────
@@ -195,14 +197,52 @@ fi
 [ -n "$SUBSCRIPTION_URL" ] || err "subscription URL is required"
 ok "subscription URL captured"
 
+# ── 4b. optional Hysteria2 URI ──────────────────────────────────────────────
+# Panel subscriptions on this stack are TCP-only outbounds, which breaks
+# real-time UDP (Telegram voice in particular). Setting HY2_URI lets us
+# inject a native hysteria2 (QUIC) outbound on every sub-refresh and pin
+# it as the default. When HY2_URI is set we also disable the healthcheck
+# daemon's auto-pin -- with a single UDP-capable outbound chosen
+# deliberately, the auto-pin / sweep machinery just churns it off.
+EXISTING_HY2=""
+if [ -f "$HY2_FILE" ]; then
+    EXISTING_HY2=$(cat "$HY2_FILE")
+fi
+HY2_URI=""
+if [ -n "$EXISTING_HY2" ]; then
+    info "existing HY2_URI on file"
+    if confirm "reuse existing Hysteria2 URI"; then
+        HY2_URI="$EXISTING_HY2"
+    elif confirm "enter a new Hysteria2 URI"; then
+        HY2_URI=$(ask "HY2_URI (hy2://user:pass@host:port?obfs=...&sni=...&insecure=1#tag)")
+    else
+        info "skipping hy2 -- removing existing"
+        rm -f "$HY2_FILE"
+    fi
+else
+    info "OPTIONAL: native UDP outbound (fixes Telegram voice over TCP-only proxies)"
+    if confirm "configure a Hysteria2 URI now"; then
+        HY2_URI=$(ask "HY2_URI (hy2://user:pass@host:port?obfs=...&sni=...&insecure=1#tag)")
+    fi
+fi
+if [ -n "$HY2_URI" ]; then
+    printf '%s' "$HY2_URI" > "$HY2_FILE"; chmod 600 "$HY2_FILE"
+    ok "HY2_URI captured (healthcheck daemon will be disabled)"
+else
+    ok "no hy2 outbound (default subscription-only mode)"
+fi
+
 # ── 5. install Entware deps ─────────────────────────────────────────────────
 nstep "install Entware packages"
 
 info "running opkg update + install (this can take 1–3 min)"
 opkg update >/dev/null
-opkg install sing-box-go python3 python3-urllib python3-codecs cron curl
+DEPS="sing-box-go python3 python3-urllib python3-codecs cron curl"
+[ -n "$HY2_URI" ] && DEPS="$DEPS jq"
+# shellcheck disable=SC2086
+opkg install $DEPS
 /opt/etc/init.d/S10cron start 2>/dev/null || true
-ok "sing-box-go, python3, cron installed"
+ok "sing-box-go, python3, cron${HY2_URI:+, jq} installed"
 
 # ── 6. healthcheck secret ───────────────────────────────────────────────────
 nstep "Clash API secret"
@@ -242,7 +282,16 @@ fetch "$REPO_URL/S99singbox-healthcheck"        /opt/etc/init.d/S99singbox-healt
 fetch "$REPO_URL/singbox-healthcheck-watchdog"  /opt/etc/cron.1min/singbox-healthcheck-watchdog 0755
 fetch "$REPO_URL/sub-refresh.sh"                /opt/etc/cron.daily/sub-refresh                 0755
 fetch "$REPO_URL/sub_to_singbox.py"             "$SHARE_DIR/sub_to_singbox.py"                  0644
-ok "4 scripts deployed"
+if [ -n "$HY2_URI" ]; then
+    fetch "$REPO_URL/inject-hy2.sh"             "$SHARE_DIR/inject-hy2.sh"                      0755
+    # When hy2 is the deliberate pin, the auto-pin daemon just churns it off.
+    printf 'HEALTHCHECK_ENABLED=0\n' > "$ENV_FILE"; chmod 600 "$ENV_FILE"
+    ok "5 scripts deployed (hy2 injector included; daemon disabled via .env)"
+else
+    # Keep .env clean of stale flags when re-installing without hy2.
+    rm -f "$ENV_FILE"
+    ok "4 scripts deployed"
+fi
 
 # ── 8. generate config + apply NDM setup ────────────────────────────────────
 nstep "configure sing-box + register NDM interface"
@@ -253,6 +302,12 @@ export SINGBOX_HEALTHCHECK_SECRET="$SECRET" ROUTER_HOST="$ROUTER_IP"
     --out "$SING_DIR/config.json" \
     --ndm-setup "$NDM_TMP" \
     --router-ip "$ROUTER_IP"
+
+if [ -n "$HY2_URI" ]; then
+    info "injecting hy2 outbound"
+    HY2_URI="$HY2_URI" "$SHARE_DIR/inject-hy2.sh" "$SING_DIR/config.json" \
+        || err "inject-hy2 failed"
+fi
 
 info "validating config"
 /opt/bin/sing-box check -C "$SING_DIR/" || err "sing-box rejected the generated config"
@@ -273,7 +328,12 @@ nstep "start services + smoke test"
 
 /opt/etc/init.d/S99sing-box start
 sleep 6
-/opt/etc/init.d/S99singbox-healthcheck start
+if [ -n "$HY2_URI" ]; then
+    info "healthcheck daemon kept disabled (.env HEALTHCHECK_ENABLED=0)"
+    /opt/etc/init.d/S99singbox-healthcheck stop 2>/dev/null || true
+else
+    /opt/etc/init.d/S99singbox-healthcheck start
+fi
 
 if pgrep sing-box >/dev/null; then ok "sing-box running"
 else err "sing-box did not start — check /tmp/sing-box.log"; fi

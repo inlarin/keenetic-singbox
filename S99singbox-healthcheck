@@ -35,6 +35,16 @@
 ENABLED=yes
 PATH=/opt/sbin:/opt/bin:/opt/usr/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
+# Post-install knob: write HEALTHCHECK_ENABLED=0 to /opt/etc/sing-box/.env
+# to keep the daemon off (the watchdog also honours this file, so a
+# disabled daemon stays down across reboots). Used together with hy2
+# pinning -- with a single UDP-capable outbound pinned via select.default,
+# the auto-pin / sweep machinery is counterproductive.
+[ -f /opt/etc/sing-box/.env ] && . /opt/etc/sing-box/.env
+case "${HEALTHCHECK_ENABLED:-yes}" in
+    0|no|false|off) ENABLED=no ;;
+esac
+
 # All runtime state on tmpfs to spare UBIFS NAND wear. Lost on reboot —
 # daemon rebuilds ranking on first sweep (~5 min), select.now restored
 # from sing-box's cache.db (also tmpfs but loaded from running config).

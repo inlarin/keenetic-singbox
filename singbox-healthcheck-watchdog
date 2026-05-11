@@ -6,6 +6,13 @@
 PID=/tmp/singbox-healthcheck.pid           # matches healthcheck daemon's tmpfs path
 INIT=/opt/etc/init.d/S99singbox-healthcheck
 
+# Honour the same disable knob as the daemon -- without this the watchdog
+# would respawn-spam every minute when HEALTHCHECK_ENABLED=0.
+[ -f /opt/etc/sing-box/.env ] && . /opt/etc/sing-box/.env
+case "${HEALTHCHECK_ENABLED:-yes}" in
+    0|no|false|off) exit 0 ;;
+esac
+
 is_running() {
     [ -f "$PID" ] && kill -0 "$(cat "$PID" 2>/dev/null)" 2>/dev/null
 }

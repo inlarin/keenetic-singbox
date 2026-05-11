@@ -34,10 +34,20 @@ fi
 
 DIR=/opt/share/sing-box
 CONV="$DIR/sub_to_singbox.py"
+INJECT_HY2="$DIR/inject-hy2.sh"        # optional; runs only if HY2_URI set
+HY2_URI_FILE=/opt/etc/sing-box/.hy2-uri
 LOG=/tmp/sub-refresh.log              # tmpfs to spare NAND wear; rotates on reboot
 ACTIVE=/opt/etc/sing-box/config.json
 SECRET_FILE="$DIR/clash_secret"     # optional override; falls back to grep-from-config
 CLASH_API="${CLASH_API:-http://127.0.0.1:9090}"
+
+# Optional: load HY2_URI (used by inject-hy2.sh) from file. Same pattern
+# as .subscription-url -- keeps the credential off env / process listing.
+HY2_URI="${HY2_URI:-}"
+if [ -z "$HY2_URI" ] && [ -f "$HY2_URI_FILE" ]; then
+    HY2_URI=$(cat "$HY2_URI_FILE")
+fi
+export HY2_URI
 
 mkdir -p "$DIR"
 
@@ -72,6 +82,16 @@ if ! /opt/bin/python3 sub_to_singbox.py --file sub.txt --out new.json \
         --ndm-setup new_ndm_setup.cmd >> "$LOG" 2>&1; then
     log "FAIL: converter failed"
     exit 1
+fi
+
+# Optional hy2 outbound injection (idempotent; no-op without HY2_URI).
+# Runs AFTER the converter so it can patch the freshly-generated config,
+# and BEFORE `sing-box check` so a malformed URI fails fast.
+if [ -n "$HY2_URI" ] && [ -x "$INJECT_HY2" ]; then
+    if ! "$INJECT_HY2" "$TMP/new.json" >> "$LOG" 2>&1; then
+        log "FAIL: inject-hy2 rejected URI"
+        exit 1
+    fi
 fi
 
 # Validate new config
