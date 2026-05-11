@@ -268,7 +268,8 @@ printf '%s' "$SUBSCRIPTION_URL" > "$URL_FILE"; chmod 600 "$URL_FILE"
 nstep "download stack from public repo"
 
 mkdir -p /opt/var/lib/sing-box "$SHARE_DIR/ui" \
-         /opt/etc/cron.1min /opt/etc/cron.daily
+         /opt/etc/cron.1min /opt/etc/cron.daily \
+         /opt/etc/ndm/ifstatechanged.d
 
 fetch() {
     src=$1; dst=$2; mode=${3:-0644}
@@ -282,15 +283,23 @@ fetch "$REPO_URL/S99singbox-healthcheck"        /opt/etc/init.d/S99singbox-healt
 fetch "$REPO_URL/singbox-healthcheck-watchdog"  /opt/etc/cron.1min/singbox-healthcheck-watchdog 0755
 fetch "$REPO_URL/sub-refresh.sh"                /opt/etc/cron.daily/sub-refresh                 0755
 fetch "$REPO_URL/sub_to_singbox.py"             "$SHARE_DIR/sub_to_singbox.py"                  0644
+fetch "$REPO_URL/opkgtun-routes-patch.sh"       /opt/bin/opkgtun-routes-patch.sh                0755
+# Watchdog for missing `default via 172.19.0.1 dev opkgtun0` in fwmark
+# tables -- NDM occasionally drops them (observed after `system
+# configuration save` following dns-proxy route edits). Two triggers:
+# cron.1min as polling safety net, and NDM ifstatechanged hook for
+# immediate response to OpkgTun0 state changes (e.g. sing-box restart).
+ln -sf /opt/bin/opkgtun-routes-patch.sh /opt/etc/cron.1min/opkgtun-routes-patch
+ln -sf /opt/bin/opkgtun-routes-patch.sh /opt/etc/ndm/ifstatechanged.d/40-opkgtun-routes
 if [ -n "$HY2_URI" ]; then
     fetch "$REPO_URL/inject-hy2.sh"             "$SHARE_DIR/inject-hy2.sh"                      0755
     # When hy2 is the deliberate pin, the auto-pin daemon just churns it off.
     printf 'HEALTHCHECK_ENABLED=0\n' > "$ENV_FILE"; chmod 600 "$ENV_FILE"
-    ok "5 scripts deployed (hy2 injector included; daemon disabled via .env)"
+    ok "6 scripts deployed (hy2 injector + opkgtun-routes-patch; daemon disabled via .env)"
 else
     # Keep .env clean of stale flags when re-installing without hy2.
     rm -f "$ENV_FILE"
-    ok "4 scripts deployed"
+    ok "5 scripts deployed (opkgtun-routes-patch included)"
 fi
 
 # ── 8. generate config + apply NDM setup ────────────────────────────────────
