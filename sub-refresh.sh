@@ -49,6 +49,14 @@ if [ -z "$HY2_URI" ] && [ -f "$HY2_URI_FILE" ]; then
 fi
 export HY2_URI
 
+# Optional runtime knobs from /opt/etc/sing-box/.env (HEALTHCHECK_ENABLED
+# already lives here). Lets inject-hy2.sh pick up HY2_UP_MBPS /
+# HY2_DOWN_MBPS for Brutal CC bandwidth advertisement.
+if [ -f /opt/etc/sing-box/.env ]; then
+    . /opt/etc/sing-box/.env
+fi
+export HY2_UP_MBPS HY2_DOWN_MBPS
+
 mkdir -p "$DIR"
 
 ts() { date '+%Y-%m-%d %H:%M:%S'; }

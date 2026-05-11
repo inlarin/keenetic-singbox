@@ -88,6 +88,15 @@ TAG="hy2-$(echo "$RAW_TAG" | tr -c 'A-Za-z0-9-' '-' | sed 's/-\{2,\}/-/g; s/^-//
 # Insecure -> bool
 case "$INSECURE" in 1|true|yes|on) INS_BOOL=true ;; *) INS_BOOL=false ;; esac
 
+# Optional Brutal CC bandwidth advertisement. When BOTH HY2_UP_MBPS and
+# HY2_DOWN_MBPS are set, sing-box switches the QUIC sender from BBR-like
+# to Hysteria2's Brutal CC -- a no-backoff fixed-rate sender that ignores
+# packet-loss signals. Measured 2026-05-11 on a Cortex-A53: gives ~15-20%
+# higher throughput at the cost of ~20pp more ppp0 overhead (retransmits).
+# Server must support Brutal (default for Hysteria2 servers).
+UP_MBPS="${HY2_UP_MBPS:-}"
+DOWN_MBPS="${HY2_DOWN_MBPS:-}"
+
 # Build the outbound JSON
 if [ -n "$OBFS" ]; then
     OUTBOUND=$(jq -n \
@@ -103,6 +112,12 @@ else
         --arg pw "$AUTH" --arg sni "$SNI" --argjson insecure "$INS_BOOL" \
         '{type:"hysteria2", tag:$tag, server:$server, server_port:$port, password:$pw,
           tls:{enabled:true, server_name:$sni, insecure:$insecure}}')
+fi
+
+if [ -n "$UP_MBPS" ] && [ -n "$DOWN_MBPS" ]; then
+    OUTBOUND=$(printf '%s' "$OUTBOUND" | jq \
+        --argjson up "$UP_MBPS" --argjson down "$DOWN_MBPS" \
+        '. + {up_mbps:$up, down_mbps:$down}')
 fi
 
 # Idempotency
